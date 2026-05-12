@@ -1,0 +1,21 @@
+# Capture artifacts (local testing)
+*.pcap
+*.etl
+*.tar.gz
+sslkeys.log
+mitmproxy-flows
+bundle/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# Node (commitlint)
+node_modules/
+package-lock.json
+package.json
+
+# OS
+.DS_Store
+Thumbs.db
