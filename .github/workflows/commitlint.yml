@@ -2,7 +2,7 @@ name: Commitlint
 
 on:
   pull_request:
-    branches: [main, init-main]
+    branches: [main, init-main, v1]
     types: [opened, synchronize, reopened, edited]
 
 permissions: {}
@@ -14,7 +14,7 @@ concurrency:
 jobs:
   commitlint:
     name: Validate commits and PR title
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04-arm
     permissions:
       contents: read
       pull-requests: read
