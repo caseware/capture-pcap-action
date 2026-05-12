@@ -1,0 +1,42 @@
+name: 'Stop PCAP Capture & Upload'
+description: |
+  Stops mitmproxy + packet capture, bundles artifacts, and uploads to S3.
+  The S3 upload runs as a post step so it executes even if later steps fail.
+author: 'CaseWare'
+
+inputs:
+  capture-dir:
+    description: 'Capture directory (auto-detected from start action via PCAP_CAPTURE_DIR env var).'
+    required: false
+    default: ''
+  s3-bucket:
+    description: 'S3 bucket name for the upload.'
+    required: true
+  s3-prefix:
+    description: 'S3 key prefix (folder path) for the upload.'
+    required: false
+    default: 'pcap-captures'
+  s3-endpoint:
+    description: 'Custom S3 endpoint URL (for MinIO, LocalStack, etc.). Leave empty for real AWS S3.'
+    required: false
+    default: ''
+  artifact-name:
+    description: 'Name for the capture bundle. Defaults to a timestamped name.'
+    required: false
+    default: ''
+
+outputs:
+  pcap-file:
+    description: 'Local path to the final PCAP file.'
+  sslkeylog-file:
+    description: 'Local path to the TLS session keys file.'
+  bundle-path:
+    description: 'Local path to the capture bundle archive.'
+  s3-uri:
+    description: 'S3 URI of the uploaded capture bundle.'
+
+runs:
+  using: 'node20'
+  main: 'src/main.js'
+  post: 'src/post.js'
+  post-if: 'always()'
