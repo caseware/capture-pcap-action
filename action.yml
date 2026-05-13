@@ -391,14 +391,31 @@ runs:
       env:
         PROXY_PORT: ${{ inputs.proxy-port }}
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
+        PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
       run: |
         PROXY_URL="http://127.0.0.1:$PROXY_PORT"
+
+        # Convert ignore-hosts regex to no_proxy hostname list.
+        # e.g. 'cloud\.nx\.app|.*\.nx\.app' → 'cloud.nx.app,.nx.app,localhost,127.0.0.1,::1'
+        NO_PROXY_LIST="localhost,127.0.0.1,::1"
+        if [ -n "$PCAP_IGNORE_HOSTS" ]; then
+          CONVERTED=$(echo "$PCAP_IGNORE_HOSTS" \
+            | tr '|' '\n' \
+            | sed 's/^\.\*//' \
+            | sed 's/\\././g' \
+            | paste -sd, -)
+          NO_PROXY_LIST="${CONVERTED},${NO_PROXY_LIST}"
+          echo "no_proxy bypass list: $NO_PROXY_LIST"
+        fi
+
         {
           echo "HTTP_PROXY=$PROXY_URL"
           echo "HTTPS_PROXY=$PROXY_URL"
           echo "http_proxy=$PROXY_URL"
           echo "https_proxy=$PROXY_URL"
+          echo "NO_PROXY=$NO_PROXY_LIST"
+          echo "no_proxy=$NO_PROXY_LIST"
           echo "SSLKEYLOGFILE=$CAPTURE_DIR/sslkeys.log"
           echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
         } >> "$GITHUB_ENV"
-        echo "Proxy configured at $PROXY_URL"
+        echo "Proxy configured at $PROXY_URL (bypass: $NO_PROXY_LIST)"
