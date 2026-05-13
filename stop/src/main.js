@@ -193,6 +193,7 @@ async function main() {
   if (envFile) {
     const vars = [
       "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+      "NO_PROXY", "no_proxy",
       "NODE_EXTRA_CA_CERTS", "SSLKEYLOGFILE"
     ];
     const lines = vars.map((v) => `${v}=`).join("\n") + "\n";
