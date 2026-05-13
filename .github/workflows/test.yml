@@ -122,11 +122,11 @@ jobs:
             -o /dev/null -w "example.com: HTTP %{http_code}\n" \
             https://example.com
 
-          # This request goes through the proxy as a TCP tunnel
-          # (--allow-hosts does not match github.com). No TLS
-          # interception — original server cert is used, so no --cacert.
+          # github.com is MITM-intercepted like all traffic; the CA is
+          # trusted system-wide via update-ca-certificates.
           curl -sS --max-time 15 \
-            -o /dev/null -w "github.com (tunneled): HTTP %{http_code}\n" \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
             https://github.com
 
           echo "=== Test requests complete ==="
