@@ -255,7 +255,8 @@ runs:
         echo "$MITM_PID" > "$CAPTURE_DIR/mitmdump.pid"
         echo "mitmdump PID: $MITM_PID"
 
-        # Wait for proxy to be ready
+        # Wait for proxy to be ready (TCP port check — mitm.it HTTP
+        # check is unreliable when --allow-hosts filters non-target domains).
         READY=false
         for i in $(seq 1 30); do
           if ! kill -0 "$MITM_PID" 2>/dev/null; then
@@ -263,16 +264,10 @@ runs:
             cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
             break
           fi
-          if curl -s --proxy "http://127.0.0.1:$PROXY_PORT" \
-            --max-time 2 http://mitm.it/ >/dev/null 2>&1; then
+          if ss -tlnp 2>/dev/null | grep -q ":$PROXY_PORT "; then
             echo "mitmproxy is ready (iteration $i)"
             READY=true
             break
-          fi
-          if [ "$i" = "5" ] || [ "$i" = "15" ] || [ "$i" = "30" ]; then
-            echo "Readiness probe attempt $i/30 — still waiting"
-            ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " || echo "  port $PROXY_PORT not yet listening"
-            tail -5 "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
           fi
           sleep 1
         done
@@ -280,11 +275,9 @@ runs:
           echo "PCAP_PROXY_READY=true" >> "$GITHUB_ENV"
         else
           echo "::warning::mitmproxy readiness check timed out"
-          echo "--- mitmdump log ---"
           cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
-          echo "--- process status ---"
-          ps -p "$MITM_PID" -o pid,stat,time,cmd 2>/dev/null || echo "Process $MITM_PID not running"
-          ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " || echo "Port $PROXY_PORT not listening"
+          ps -p "$MITM_PID" -o pid,stat,time,cmd 2>/dev/null \
+            || echo "Process $MITM_PID not running"
           echo "PCAP_PROXY_READY=false" >> "$GITHUB_ENV"
         fi
         echo "::endgroup::"
@@ -340,16 +333,26 @@ runs:
         $proc.Id | Out-File -FilePath (Join-Path $env:CAPTURE_DIR "mitmdump.pid") -NoNewline
         Write-Host "mitmdump PID: $($proc.Id)"
 
-        for ($i = 0; $i -lt 30; $i++) {
-          try {
-            $null = Invoke-WebRequest -Uri "http://mitm.it/" `
-              -Proxy "http://127.0.0.1:$env:PROXY_PORT" `
-              -TimeoutSec 2 -ErrorAction Stop
-            Write-Host "mitmproxy is ready"
+        $ready = $false
+        for ($i = 1; $i -le 30; $i++) {
+          if ($proc.HasExited) {
+            Write-Host "::warning::mitmdump exited early"
             break
-          } catch {
-            Start-Sleep -Seconds 1
           }
+          $listener = Get-NetTCPConnection -LocalPort $env:PROXY_PORT `
+            -State Listen -ErrorAction SilentlyContinue
+          if ($listener) {
+            Write-Host "mitmproxy is ready (iteration $i)"
+            $ready = $true
+            break
+          }
+          Start-Sleep -Seconds 1
+        }
+        if ($ready) {
+          echo "PCAP_PROXY_READY=true" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "::warning::mitmproxy readiness check timed out"
+          echo "PCAP_PROXY_READY=false" >> $env:GITHUB_ENV
         }
         Write-Host "::endgroup::"
 
