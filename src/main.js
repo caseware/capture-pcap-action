@@ -1,33 +1,30 @@
 const { execSync } = require("node:child_process");
 const crypto = require("node:crypto");
-const fs = require("node:fs");
+const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 
-function appendOutput(key, value) {
+async function appendFile(filePath, content) {
+  await fs.appendFile(filePath, content);
+}
+
+async function appendOutput(key, value) {
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
     const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
-    fs.appendFileSync(
-      outputFile,
-      `${key}<<${delimiter}\n${value}\n${delimiter}\n`
-    );
+    await appendFile(outputFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
   }
 }
 
-function saveState(key, value) {
+async function saveState(key, value) {
   const stateFile = process.env.GITHUB_STATE;
   if (stateFile) {
     const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
-    fs.appendFileSync(
-      stateFile,
-      `${key}<<${delimiter}\n${value}\n${delimiter}\n`
-    );
+    await appendFile(stateFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
   }
 }
 
 function getInput(name) {
-  // Match @actions/core: only spaces are replaced, hyphens stay
   const envName = `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
   return (process.env[envName] || "").trim();
 }
@@ -41,7 +38,11 @@ function run(cmd, opts = {}) {
   }
 }
 
-function main() {
+async function exists(p) {
+  try { await fs.access(p); return true; } catch { return false; }
+}
+
+async function main() {
   const captureDir =
     getInput("capture-dir") ||
     process.env.PCAP_CAPTURE_DIR ||
@@ -58,8 +59,8 @@ function main() {
 
   // ── Stop mitmproxy ──────────────────────────────────────────────
   const mitmdumpPidFile = path.join(captureDir, "mitmdump.pid");
-  if (fs.existsSync(mitmdumpPidFile)) {
-    const pid = fs.readFileSync(mitmdumpPidFile, "utf8").trim();
+  if (await exists(mitmdumpPidFile)) {
+    const pid = (await fs.readFile(mitmdumpPidFile, "utf8")).trim();
     console.log(`Stopping mitmdump (PID ${pid})...`);
     if (os.platform() === "win32") {
       run(`taskkill /PID ${pid} /F`, { ignoreError: true });
@@ -71,13 +72,12 @@ function main() {
         shell: "/bin/bash",
       });
     }
-    fs.unlinkSync(mitmdumpPidFile);
+    await fs.unlink(mitmdumpPidFile);
     console.log("mitmdump stopped");
 
-    // Dump mitmdump log for debugging proxy issues
     const mitmdumpLog = path.join(captureDir, "mitmdump-stdout.log");
-    if (fs.existsSync(mitmdumpLog)) {
-      const log = fs.readFileSync(mitmdumpLog, "utf8").trim();
+    if (await exists(mitmdumpLog)) {
+      const log = (await fs.readFile(mitmdumpLog, "utf8")).trim();
       if (log) {
         console.log("::group::mitmdump log");
         console.log(log);
@@ -91,8 +91,8 @@ function main() {
   // ── Stop tcpdump / netsh ────────────────────────────────────────
   if (os.platform() !== "win32") {
     const tcpdumpPidFile = path.join(captureDir, "tcpdump.pid");
-    if (fs.existsSync(tcpdumpPidFile)) {
-      const pid = fs.readFileSync(tcpdumpPidFile, "utf8").trim();
+    if (await exists(tcpdumpPidFile)) {
+      const pid = (await fs.readFile(tcpdumpPidFile, "utf8")).trim();
       console.log(`Stopping tcpdump (PID ${pid})...`);
       run(`sudo kill ${pid} 2>/dev/null || true`, {
         ignoreError: true,
@@ -103,7 +103,7 @@ function main() {
         ignoreError: true,
         shell: "/bin/bash",
       });
-      fs.unlinkSync(tcpdumpPidFile);
+      await fs.unlink(tcpdumpPidFile);
       console.log("tcpdump stopped");
     }
   } else {
@@ -112,12 +112,12 @@ function main() {
 
     const etlFile = path.join(captureDir, "raw-capture.etl");
     const pcapFile = path.join(captureDir, "raw-capture.pcap");
-    if (fs.existsSync(etlFile)) {
+    if (await exists(etlFile)) {
       try {
         run(`etl2pcapng "${etlFile}" "${pcapFile}"`);
       } catch {
         console.log("::warning::etl2pcapng not found; copying ETL as-is");
-        fs.copyFileSync(etlFile, pcapFile);
+        await fs.copyFile(etlFile, pcapFile);
       }
     }
   }
@@ -128,22 +128,24 @@ function main() {
   const caCert = path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
   const flowsFile = path.join(captureDir, "mitmproxy-flows");
 
-  const hasRawCapture = fs.existsSync(pcapFile);
+  const hasRawCapture = await exists(pcapFile);
 
   if (hasRawCapture) {
-    const size = fs.statSync(pcapFile).size;
-    console.log(`PCAP file: ${pcapFile} (${size} bytes)`);
+    const stat = await fs.stat(pcapFile);
+    console.log(`PCAP file: ${pcapFile} (${stat.size} bytes)`);
   } else {
     console.log("No raw PCAP (raw-capture was disabled or tcpdump/netsh was not used)");
   }
 
-  if (hasRawCapture && fs.existsSync(sslKeylog)) {
-    const lines = fs.readFileSync(sslKeylog, "utf8").split("\n").length;
-    console.log(`SSL keylog: ${sslKeylog} (${lines} keys)`);
+  if (hasRawCapture && await exists(sslKeylog)) {
+    const content = await fs.readFile(sslKeylog, "utf8");
+    console.log(`SSL keylog: ${sslKeylog} (${content.split("\n").length} keys)`);
   }
 
-  appendOutput("pcap-file", pcapFile);
-  appendOutput("sslkeylog-file", sslKeylog);
+  await Promise.all([
+    appendOutput("pcap-file", pcapFile),
+    appendOutput("sslkeylog-file", sslKeylog),
+  ]);
 
   // ── Create bundle ───────────────────────────────────────────────
   let artifactName = getInput("artifact-name");
@@ -153,7 +155,7 @@ function main() {
   }
 
   const bundleDir = path.join(captureDir, "bundle");
-  fs.mkdirSync(bundleDir, { recursive: true });
+  await fs.mkdir(bundleDir, { recursive: true });
 
   // Always include mitmproxy flows; only include raw PCAP, SSL keys,
   // and CA cert when raw capture was active (tcpdump/netsh produced a file).
@@ -162,11 +164,13 @@ function main() {
     bundleFiles.push(pcapFile, sslKeylog, caCert);
   }
 
-  for (const f of bundleFiles) {
-    if (fs.existsSync(f)) {
-      fs.copyFileSync(f, path.join(bundleDir, path.basename(f)));
-    }
-  }
+  await Promise.all(
+    bundleFiles.map(async (f) => {
+      if (await exists(f)) {
+        await fs.copyFile(f, path.join(bundleDir, path.basename(f)));
+      }
+    })
+  );
 
   const bundlePath = path.join(captureDir, `${artifactName}.tar.gz`);
   if (os.platform() !== "win32") {
@@ -175,12 +179,12 @@ function main() {
     run(`tar -czf "${bundlePath}" -C "${bundleDir}" .`, { shell: true });
   }
 
-  const bundleSize = fs.existsSync(bundlePath)
-    ? fs.statSync(bundlePath).size
+  const bundleSize = (await exists(bundlePath))
+    ? (await fs.stat(bundlePath)).size
     : 0;
   console.log(`Bundle: ${bundlePath} (${bundleSize} bytes)`);
 
-  appendOutput("bundle-path", bundlePath);
+  await appendOutput("bundle-path", bundlePath);
 
   // ── Clear proxy env vars so later steps connect directly ────────
   const envFile = process.env.GITHUB_ENV;
@@ -190,19 +194,23 @@ function main() {
       "NODE_EXTRA_CA_CERTS", "SSLKEYLOGFILE"
     ];
     const lines = vars.map((v) => `${v}=`).join("\n") + "\n";
-    fs.appendFileSync(envFile, lines);
+    await appendFile(envFile, lines);
     console.log("Cleared proxy/CA env vars from GITHUB_ENV");
   }
 
   // ── Save state for post step (S3 upload) ────────────────────────
-  saveState("bundle-path", bundlePath);
-  saveState("artifact-name", artifactName);
-  saveState("s3-bucket", getInput("s3-bucket"));
-  saveState("s3-prefix", getInput("s3-prefix") || "pcap-captures");
-  saveState("s3-endpoint", getInput("s3-endpoint"));
-  saveState("capture-dir", captureDir);
+  // Serialized to avoid interleaving in the state file
+  await saveState("bundle-path", bundlePath);
+  await saveState("artifact-name", artifactName);
+  await saveState("s3-bucket", getInput("s3-bucket"));
+  await saveState("s3-prefix", getInput("s3-prefix") || "pcap-captures");
+  await saveState("s3-endpoint", getInput("s3-endpoint"));
+  await saveState("capture-dir", captureDir);
 
   console.log("Capture stopped and bundled. S3 upload will run in post step.");
 }
 
-main();
+main().catch((e) => {
+  console.error(`::error::${e.message}`);
+  process.exit(1);
+});
