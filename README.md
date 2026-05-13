@@ -77,13 +77,14 @@ Only capture traffic to your own services:
 | `proxy-port` | `8080` | Port for the mitmproxy forward proxy |
 | `capture-dir` | `$RUNNER_TEMP/pcap-capture` | Directory for capture artifacts |
 | `process-name` | _(empty)_ | _(reserved, not yet implemented)_ Process name filter |
-| `mitmproxy-version` | `11.1.3` | mitmproxy version to install |
+| `mitmproxy-version` | `11.0.2` | mitmproxy version to install |
 | `filter-domains` | _(empty)_ | Domain allowlist (comma-sep, globs OK, e.g. `*.caseware.com`) |
 | `filter-exclude-domains` | _(empty)_ | Domain denylist (comma-sep, globs OK) |
 | `filter-referers` | _(empty)_ | Referer patterns to keep (comma-sep, globs OK) |
 | `filter-content-types` | _(empty)_ | Content-type prefixes to keep (e.g. `text/html,application/json`) |
 | `filter-max-body-size` | `0` | Max response body size in bytes (0 = no limit) |
 | `raw-capture` | `false` | Also run tcpdump/netsh for raw packet capture alongside mitmproxy |
+| `no-proxy` | `cloud.nx.app,nx.app,registry.npmjs.org,objects.githubusercontent.com,localhost,127.0.0.1,::1` | Comma-separated hosts that bypass the proxy (NO_PROXY) |
 
 ### `stop/`
 
