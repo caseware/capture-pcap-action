@@ -249,20 +249,44 @@ runs:
           --save-stream-file "$CAPTURE_DIR/mitmproxy-flows" \
           $ADDON_FLAG \
           $ALLOW_FLAGS \
-          --quiet &
+          --quiet \
+          > "$CAPTURE_DIR/mitmdump-stdout.log" 2>&1 &
         MITM_PID=$!
         echo "$MITM_PID" > "$CAPTURE_DIR/mitmdump.pid"
         echo "mitmdump PID: $MITM_PID"
 
         # Wait for proxy to be ready
+        READY=false
         for i in $(seq 1 30); do
+          if ! kill -0 "$MITM_PID" 2>/dev/null; then
+            echo "::warning::mitmdump (PID $MITM_PID) exited early"
+            cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
+            break
+          fi
           if curl -s --proxy "http://127.0.0.1:$PROXY_PORT" \
             --max-time 2 http://mitm.it/ >/dev/null 2>&1; then
-            echo "mitmproxy is ready"
+            echo "mitmproxy is ready (iteration $i)"
+            READY=true
             break
+          fi
+          if [ "$i" = "5" ] || [ "$i" = "15" ] || [ "$i" = "30" ]; then
+            echo "Readiness probe attempt $i/30 — still waiting"
+            ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " || echo "  port $PROXY_PORT not yet listening"
+            tail -5 "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
           fi
           sleep 1
         done
+        if [ "$READY" = "true" ]; then
+          echo "PCAP_PROXY_READY=true" >> "$GITHUB_ENV"
+        else
+          echo "::warning::mitmproxy readiness check timed out"
+          echo "--- mitmdump log ---"
+          cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
+          echo "--- process status ---"
+          ps -p "$MITM_PID" -o pid,stat,time,cmd 2>/dev/null || echo "Process $MITM_PID not running"
+          ss -tlnp 2>/dev/null | grep ":$PROXY_PORT " || echo "Port $PROXY_PORT not listening"
+          echo "PCAP_PROXY_READY=false" >> "$GITHUB_ENV"
+        fi
         echo "::endgroup::"
 
     - name: Start mitmproxy (Windows)
@@ -336,6 +360,7 @@ runs:
     # not needed — the system trust store (updated by update-ca-certificates)
     # already contains the mitmproxy CA.
     - name: Configure proxy environment
+      if: env.PCAP_PROXY_READY == 'true'
       shell: bash
       env:
         PROXY_PORT: ${{ inputs.proxy-port }}
