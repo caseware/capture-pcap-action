@@ -13,11 +13,12 @@ inputs:
     default: ''
   process-name:
     description: |
-      (Best-effort) Filter capture to traffic from this process name.
-      On Linux uses iptables owner match when possible; otherwise all
-      traffic through the proxy is captured. Ignored on Windows.
+      Reserved for future use. Will support best-effort process-name
+      filtering via iptables owner match on Linux. Currently ignored
+      on all platforms.
     required: false
     default: ''
+    deprecationMessage: 'Not yet implemented — reserved for a future release.'
   mitmproxy-version:
     description: 'mitmproxy version to install via pip.'
     required: false
@@ -288,7 +289,7 @@ runs:
           echo "http_proxy=$PROXY_URL"
           echo "https_proxy=$PROXY_URL"
           echo "SSLKEYLOGFILE=$CAPTURE_DIR/sslkeys.log"
-          echo "NODE_TLS_REJECT_UNAUTHORIZED=0"
+          echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
           echo "REQUESTS_CA_BUNDLE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
           echo "SSL_CERT_FILE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
           echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
