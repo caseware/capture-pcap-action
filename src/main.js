@@ -167,9 +167,7 @@ function main() {
   if (envFile) {
     const vars = [
       "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
-      "NO_PROXY", "no_proxy",
-      "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
-      "SSL_CERT_FILE", "CURL_CA_BUNDLE", "SSLKEYLOGFILE"
+      "NODE_EXTRA_CA_CERTS", "SSLKEYLOGFILE"
     ];
     const lines = vars.map((v) => `${v}=`).join("\n") + "\n";
     fs.appendFileSync(envFile, lines);
