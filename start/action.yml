@@ -20,7 +20,7 @@ inputs:
     default: ''
     deprecationMessage: 'Not yet implemented — reserved for a future release.'
   mitmproxy-version:
-    description: 'mitmproxy version to install via pip.'
+    description: 'mitmproxy version to download (standalone binary from GitHub releases).'
     required: false
     default: '11.0.2'
   filter-domains:
@@ -47,10 +47,6 @@ inputs:
     description: 'Also run tcpdump (Linux) or netsh trace (Windows) for raw packet capture alongside mitmproxy. Default: false (mitmproxy only).'
     required: false
     default: 'false'
-  no-proxy:
-    description: 'Comma-separated hosts that bypass the proxy (NO_PROXY). These hosts connect directly, skipping mitmproxy entirely.'
-    required: false
-    default: 'cloud.nx.app,nx.app,registry.npmjs.org,objects.githubusercontent.com,localhost,127.0.0.1,::1'
 
 outputs:
   capture-dir:
@@ -97,10 +93,22 @@ runs:
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
       run: |
-        echo "::group::Installing mitmproxy $MITMPROXY_VERSION"
-        pip install --quiet mitmproxy=="${MITMPROXY_VERSION}"
-        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-        export PATH="$HOME/.local/bin:$PATH"
+        echo "::group::Installing mitmproxy $MITMPROXY_VERSION (standalone binary)"
+        ARCH=$(uname -m)
+        case "$ARCH" in
+          x86_64)  ARCH_SUFFIX="x86_64" ;;
+          aarch64) ARCH_SUFFIX="aarch64" ;;
+          arm64)   ARCH_SUFFIX="aarch64" ;;
+          *)       echo "::error::Unsupported architecture: $ARCH"; exit 1 ;;
+        esac
+        DOWNLOAD_URL="https://downloads.mitmproxy.org/${MITMPROXY_VERSION}/mitmproxy-${MITMPROXY_VERSION}-linux-${ARCH_SUFFIX}.tar.gz"
+        INSTALL_DIR="$HOME/.local/bin"
+        mkdir -p "$INSTALL_DIR"
+        echo "Downloading $DOWNLOAD_URL"
+        curl -fsSL "$DOWNLOAD_URL" | tar -xz -C "$INSTALL_DIR" mitmdump
+        chmod +x "$INSTALL_DIR/mitmdump"
+        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
+        export PATH="$INSTALL_DIR:$PATH"
         mitmdump --version
         echo "::endgroup::"
 
@@ -110,10 +118,16 @@ runs:
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
       run: |
-        Write-Host "::group::Installing mitmproxy $env:MITMPROXY_VERSION"
-        pip install --quiet mitmproxy==$env:MITMPROXY_VERSION
-        $userScripts = Join-Path $env:APPDATA "Python" "Scripts"
-        if (Test-Path $userScripts) { echo $userScripts >> $env:GITHUB_PATH; $env:PATH = "$userScripts;$env:PATH" }
+        Write-Host "::group::Installing mitmproxy $env:MITMPROXY_VERSION (standalone binary)"
+        $installDir = Join-Path $env:USERPROFILE ".local" "bin"
+        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+        $url = "https://downloads.mitmproxy.org/$env:MITMPROXY_VERSION/mitmproxy-$env:MITMPROXY_VERSION-windows-x64.zip"
+        $zipPath = Join-Path $env:RUNNER_TEMP "mitmproxy.zip"
+        Write-Host "Downloading $url"
+        Invoke-WebRequest -Uri $url -OutFile $zipPath
+        Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
+        echo $installDir >> $env:GITHUB_PATH
+        $env:PATH = "$installDir;$env:PATH"
         mitmdump --version
         Write-Host "::endgroup::"
 
@@ -211,6 +225,19 @@ runs:
           echo "::warning::Filter addon not found at $ADDON_PATH"
         fi
 
+        # Build --allow-hosts from filter-domains so only target domains
+        # get TLS-intercepted; everything else is TCP-tunneled transparently.
+        ALLOW_FLAGS=""
+        if [ -n "$PCAP_FILTER_DOMAINS" ]; then
+          IFS=',' read -ra DOMAINS <<< "$PCAP_FILTER_DOMAINS"
+          for d in "${DOMAINS[@]}"; do
+            d=$(echo "$d" | xargs)  # trim
+            regex=$(echo "$d" | sed 's/\./\\./g; s/\*/.*/g')
+            ALLOW_FLAGS="$ALLOW_FLAGS --allow-hosts $regex"
+          done
+          echo "allow-hosts regexes: $ALLOW_FLAGS"
+        fi
+
         mitmdump \
           --mode regular \
           --listen-port "$PROXY_PORT" \
@@ -218,6 +245,7 @@ runs:
           --set ssl_insecure=true \
           --save-stream-file "$CAPTURE_DIR/mitmproxy-flows" \
           $ADDON_FLAG \
+          $ALLOW_FLAGS \
           --quiet &
         MITM_PID=$!
         echo "$MITM_PID" > "$CAPTURE_DIR/mitmdump.pid"
@@ -260,6 +288,17 @@ runs:
           Write-Host "Filter addon: $addonPath"
         }
 
+        # Build --allow-hosts from filter-domains
+        $allowArgs = @()
+        if ($env:PCAP_FILTER_DOMAINS) {
+          foreach ($d in $env:PCAP_FILTER_DOMAINS.Split(',')) {
+            $d = $d.Trim()
+            $regex = $d -replace '\.','\.' -replace '\*','.*'
+            $allowArgs += @("--allow-hosts", $regex)
+          }
+          Write-Host "allow-hosts regexes: $($allowArgs -join ' ')"
+        }
+
         $allArgs = @(
           "--mode", "regular",
           "--listen-port", $env:PROXY_PORT,
@@ -267,7 +306,7 @@ runs:
           "--set", "ssl_insecure=true",
           "--save-stream-file", (Join-Path $env:CAPTURE_DIR "mitmproxy-flows"),
           "--quiet"
-        ) + $addonArgs
+        ) + $addonArgs + $allowArgs
 
         $proc = Start-Process -PassThru -NoNewWindow -FilePath "mitmdump" `
           -ArgumentList $allArgs
@@ -288,12 +327,16 @@ runs:
         Write-Host "::endgroup::"
 
     # ── Export proxy settings ──────────────────────────────────────────
+    # Only HTTP_PROXY/HTTPS_PROXY and NODE_EXTRA_CA_CERTS are set.
+    # Non-intercepted hosts are TCP-tunneled by mitmproxy (--allow-hosts),
+    # so NO_PROXY and bulk CA overrides (REQUESTS_CA_BUNDLE, etc.) are
+    # not needed — the system trust store (updated by update-ca-certificates)
+    # already contains the mitmproxy CA.
     - name: Configure proxy environment
       shell: bash
       env:
         PROXY_PORT: ${{ inputs.proxy-port }}
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
-        NO_PROXY_LIST: ${{ inputs.no-proxy }}
       run: |
         PROXY_URL="http://127.0.0.1:$PROXY_PORT"
         {
@@ -301,12 +344,7 @@ runs:
           echo "HTTPS_PROXY=$PROXY_URL"
           echo "http_proxy=$PROXY_URL"
           echo "https_proxy=$PROXY_URL"
-          echo "NO_PROXY=$NO_PROXY_LIST"
-          echo "no_proxy=$NO_PROXY_LIST"
           echo "SSLKEYLOGFILE=$CAPTURE_DIR/sslkeys.log"
           echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
-          echo "REQUESTS_CA_BUNDLE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
-          echo "SSL_CERT_FILE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
-          echo "CURL_CA_BUNDLE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
         } >> "$GITHUB_ENV"
-        echo "Proxy configured at $PROXY_URL (NO_PROXY=$NO_PROXY_LIST)"
+        echo "Proxy configured at $PROXY_URL"

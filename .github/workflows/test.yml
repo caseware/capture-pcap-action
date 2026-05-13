@@ -59,11 +59,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Start MinIO
         run: |
           docker run -d --name minio \
@@ -127,12 +122,12 @@ jobs:
             -o /dev/null -w "example.com: HTTP %{http_code}\n" \
             https://example.com
 
-          # This request goes through the proxy but is killed by the
-          # filter addon since github.com is not in the allowlist.
+          # This request goes through the proxy as a TCP tunnel
+          # (--allow-hosts does not match github.com). No TLS
+          # interception — original server cert is used, so no --cacert.
           curl -sS --max-time 15 \
-            --cacert "$CA_CERT" \
-            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
-            https://github.com 2>&1 || echo "(filtered by addon — expected)"
+            -o /dev/null -w "github.com (tunneled): HTTP %{http_code}\n" \
+            https://github.com
 
           echo "=== Test requests complete ==="
 
@@ -223,11 +218,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
       - name: Start PCAP capture (no filter)
         uses: ./start
         id: pcap-start
@@ -268,11 +258,6 @@ jobs:
       contents: read
     steps:
       - uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
 
       - name: Start PCAP capture
         uses: ./start
