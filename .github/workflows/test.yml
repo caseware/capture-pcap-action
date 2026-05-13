@@ -106,6 +106,7 @@ jobs:
         id: pcap-start
         with:
           filter-domains: '*.google.com,example.com'
+          raw-capture: 'true'
 
       # ── Make HTTPS requests through the proxy ──────────────────────
       - name: Make test HTTPS requests (via proxy)

@@ -4,7 +4,7 @@ Capture e2e and regression test traffic as a **TLS-decryptable PCAP bundle** and
 
 ## How it works
 
-1. **`start/`** — Installs [mitmproxy](https://mitmproxy.org/) as a forward proxy, trusts its root CA on the OS, starts `tcpdump` (Linux) or `netsh trace` (Windows) for raw packet capture, loads an inline filter addon, and exports `HTTP_PROXY` / `HTTPS_PROXY` so downstream tests route through the proxy automatically.
+1. **`start/`** — Installs [mitmproxy](https://mitmproxy.org/) as a forward proxy, trusts its root CA on the OS, loads an inline filter addon, and exports `HTTP_PROXY` / `HTTPS_PROXY` so downstream tests route through the proxy automatically. Optionally starts `tcpdump` (Linux) or `netsh trace` (Windows) for raw packet capture when `raw-capture: true`.
 
 2. **`stop/`** — Stops the proxy and packet capture, bundles the PCAP + TLS session keys (`SSLKEYLOGFILE`) + CA cert into a `.tar.gz`. The **S3 upload runs as a post step** so it executes even if subsequent steps fail.
 
@@ -83,6 +83,7 @@ Only capture traffic to your own services:
 | `filter-referers` | _(empty)_ | Referer patterns to keep (comma-sep, globs OK) |
 | `filter-content-types` | _(empty)_ | Content-type prefixes to keep (e.g. `text/html,application/json`) |
 | `filter-max-body-size` | `0` | Max response body size in bytes (0 = no limit) |
+| `raw-capture` | `false` | Also run tcpdump/netsh for raw packet capture alongside mitmproxy |
 
 ### `stop/`
 
@@ -126,10 +127,13 @@ reach the flow file on disk. This means:
 - No post-processing ETL step is needed
 - The resulting bundle is smaller from the start
 
-The raw PCAP (tcpdump/netsh) captures all packets regardless of the filter.
-This is by design — the PCAP is useful for debugging network issues that the
-proxy filter might mask. Use the `sslkeys.log` + PCAP in Wireshark for full
-visibility, and the mitmproxy flows for the filtered view.
+When `raw-capture: true` is set, the raw PCAP (tcpdump/netsh) captures all
+packets regardless of the filter. This is useful for debugging network issues
+that the proxy filter might mask. Use the `sslkeys.log` + PCAP in Wireshark
+for full visibility, and the mitmproxy flows for the filtered view.
+
+By default (`raw-capture: false`), only mitmproxy runs — this is lighter,
+faster, and avoids the `sudo`/admin requirements of tcpdump/netsh.
 
 ## Decrypting the PCAP in Wireshark
 
