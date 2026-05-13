@@ -128,14 +128,16 @@ function main() {
   const caCert = path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
   const flowsFile = path.join(captureDir, "mitmproxy-flows");
 
-  if (fs.existsSync(pcapFile)) {
+  const hasRawCapture = fs.existsSync(pcapFile);
+
+  if (hasRawCapture) {
     const size = fs.statSync(pcapFile).size;
     console.log(`PCAP file: ${pcapFile} (${size} bytes)`);
   } else {
-    console.log("::warning::PCAP file not found");
+    console.log("No raw PCAP (raw-capture was disabled or tcpdump/netsh was not used)");
   }
 
-  if (fs.existsSync(sslKeylog)) {
+  if (hasRawCapture && fs.existsSync(sslKeylog)) {
     const lines = fs.readFileSync(sslKeylog, "utf8").split("\n").length;
     console.log(`SSL keylog: ${sslKeylog} (${lines} keys)`);
   }
@@ -153,7 +155,14 @@ function main() {
   const bundleDir = path.join(captureDir, "bundle");
   fs.mkdirSync(bundleDir, { recursive: true });
 
-  for (const f of [pcapFile, sslKeylog, flowsFile, caCert]) {
+  // Always include mitmproxy flows; only include raw PCAP, SSL keys,
+  // and CA cert when raw capture was active (tcpdump/netsh produced a file).
+  const bundleFiles = [flowsFile];
+  if (hasRawCapture) {
+    bundleFiles.push(pcapFile, sslKeylog, caCert);
+  }
+
+  for (const f of bundleFiles) {
     if (fs.existsSync(f)) {
       fs.copyFileSync(f, path.join(bundleDir, path.basename(f)));
     }
