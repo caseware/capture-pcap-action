@@ -35,7 +35,11 @@ function post() {
     return;
   }
 
-  const s3Key = `${s3Prefix}/${artifactName}.tar.gz`;
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(now.getUTCDate()).padStart(2, "0");
+  const s3Key = `${s3Prefix}/${yyyy}/${mm}/${dd}/${artifactName}.tar.gz`;
   const s3Uri = `s3://${s3Bucket}/${s3Key}`;
 
   // Unset proxy env vars so S3 upload goes direct (may be local MinIO)
