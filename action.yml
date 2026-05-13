@@ -54,7 +54,7 @@ inputs:
       avoiding cert / ECONNRESET issues with CI infrastructure (NX Cloud, etc.).
       Separate multiple patterns with '|'. Uses mitmproxy --ignore-hosts.
     required: false
-    default: 'cloud\.nx\.app|.*\.nx\.app'
+    default: 'cloud\.nx\.app|.*\.nx\.app|.*\.googleapis\.com|.*\.launchdarkly\.com'
 
 outputs:
   capture-dir:
