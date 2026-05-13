@@ -73,6 +73,17 @@ function main() {
     }
     fs.unlinkSync(mitmdumpPidFile);
     console.log("mitmdump stopped");
+
+    // Dump mitmdump log for debugging proxy issues
+    const mitmdumpLog = path.join(captureDir, "mitmdump-stdout.log");
+    if (fs.existsSync(mitmdumpLog)) {
+      const log = fs.readFileSync(mitmdumpLog, "utf8").trim();
+      if (log) {
+        console.log("::group::mitmdump log");
+        console.log(log);
+        console.log("::endgroup::");
+      }
+    }
   } else {
     console.log("::warning::mitmdump PID file not found");
   }

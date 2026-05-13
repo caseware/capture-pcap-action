@@ -47,6 +47,14 @@ inputs:
     description: 'Also run tcpdump (Linux) or netsh trace (Windows) for raw packet capture alongside mitmproxy. Default: false (mitmproxy only).'
     required: false
     default: 'false'
+  ignore-hosts:
+    description: |
+      Regex of hosts to transparently tunnel without MITM interception.
+      These connections pass through the proxy but are NOT TLS-intercepted,
+      avoiding cert / ECONNRESET issues with CI infrastructure (NX Cloud, etc.).
+      Separate multiple patterns with '|'. Uses mitmproxy --ignore-hosts.
+    required: false
+    default: 'cloud\.nx\.app|.*\.nx\.app'
 
 outputs:
   capture-dir:
@@ -218,6 +226,7 @@ runs:
         PCAP_FILTER_REFERERS: ${{ inputs.filter-referers }}
         PCAP_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
         PCAP_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
+        PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
       run: |
         echo "::group::Starting mitmdump on port $PROXY_PORT"
         export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
@@ -237,11 +246,12 @@ runs:
           echo "::warning::Filter addon not found at $ADDON_PATH"
         fi
 
-        # All traffic is MITM-intercepted (the mitmproxy CA is trusted
-        # system-wide via update-ca-certificates and NODE_EXTRA_CA_CERTS).
-        # The filter addon handles domain selection for the capture file.
-        # NOTE: --allow-hosts was removed because its TCP passthrough mode
-        # causes ECONNRESET on CONNECT tunnels (e.g. NX Cloud heartbeat).
+        # Build --ignore-hosts flag for transparent tunneling of CI infra
+        IGNORE_FLAG=""
+        if [ -n "$PCAP_IGNORE_HOSTS" ]; then
+          IGNORE_FLAG="--ignore-hosts $PCAP_IGNORE_HOSTS"
+          echo "Ignore hosts (transparent tunnel): $PCAP_IGNORE_HOSTS"
+        fi
 
         mitmdump \
           --mode regular \
@@ -250,6 +260,7 @@ runs:
           --set ssl_insecure=true \
           --save-stream-file "$CAPTURE_DIR/mitmproxy-flows" \
           $ADDON_FLAG \
+          $IGNORE_FLAG \
           --quiet \
           > "$CAPTURE_DIR/mitmdump-stdout.log" 2>&1 &
         MITM_PID=$!
@@ -294,6 +305,7 @@ runs:
         PCAP_FILTER_REFERERS: ${{ inputs.filter-referers }}
         PCAP_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
         PCAP_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
+        PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
       run: |
         Write-Host "::group::Starting mitmdump on port $env:PROXY_PORT"
         $sslKeyLog = Join-Path $env:CAPTURE_DIR "sslkeys.log"
@@ -308,6 +320,12 @@ runs:
           Write-Host "Filter addon: $addonPath"
         }
 
+        $ignoreArgs = @()
+        if ($env:PCAP_IGNORE_HOSTS) {
+          $ignoreArgs = @("--ignore-hosts", $env:PCAP_IGNORE_HOSTS)
+          Write-Host "Ignore hosts (transparent tunnel): $env:PCAP_IGNORE_HOSTS"
+        }
+
         $allArgs = @(
           "--mode", "regular",
           "--listen-port", $env:PROXY_PORT,
@@ -315,7 +333,7 @@ runs:
           "--set", "ssl_insecure=true",
           "--save-stream-file", (Join-Path $env:CAPTURE_DIR "mitmproxy-flows"),
           "--quiet"
-        ) + $addonArgs
+        ) + $addonArgs + $ignoreArgs
 
         $proc = Start-Process -PassThru -NoNewWindow -FilePath "mitmdump" `
           -ArgumentList $allArgs
