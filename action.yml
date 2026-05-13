@@ -145,9 +145,18 @@ runs:
           echo "Generating mitmproxy CA certificate..."
           mitmdump --set confdir="$CONFDIR" --no-server -q &
           PID=$!
-          sleep 2
+          for i in $(seq 1 10); do
+            if [ -f "$CONFDIR/mitmproxy-ca-cert.pem" ]; then
+              break
+            fi
+            sleep 1
+          done
           kill "$PID" 2>/dev/null || true
           wait "$PID" 2>/dev/null || true
+        fi
+        if [ ! -f "$CONFDIR/mitmproxy-ca-cert.pem" ]; then
+          echo "::error::CA certificate was not generated"
+          exit 1
         fi
         echo "CA certificate: $CONFDIR/mitmproxy-ca-cert.pem"
         openssl x509 -in "$CONFDIR/mitmproxy-ca-cert.pem" -noout -subject -dates
