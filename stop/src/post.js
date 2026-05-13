@@ -1,6 +1,7 @@
-const { execSync } = require("child_process");
-const fs = require("fs");
-const os = require("os");
+const { execFileSync } = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const os = require("node:os");
 
 function getState(key) {
   return (process.env[`STATE_${key}`] || "").trim();
@@ -9,13 +10,12 @@ function getState(key) {
 function appendOutput(key, value) {
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
-    fs.appendFileSync(outputFile, `${key}=${value}\n`);
+    const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
+    fs.appendFileSync(
+      outputFile,
+      `${key}<<${delimiter}\n${value}\n${delimiter}\n`
+    );
   }
-}
-
-function run(cmd, opts = {}) {
-  console.log(`> ${cmd}`);
-  return execSync(cmd, { stdio: "inherit", ...opts });
 }
 
 function post() {
@@ -38,8 +38,6 @@ function post() {
   const s3Key = `${s3Prefix}/${artifactName}.tar.gz`;
   const s3Uri = `s3://${s3Bucket}/${s3Key}`;
 
-  const endpointFlag = s3Endpoint ? `--endpoint-url ${s3Endpoint}` : "";
-
   // Unset proxy env vars so S3 upload goes direct (may be local MinIO)
   const cleanEnv = { ...process.env };
   delete cleanEnv.HTTP_PROXY;
@@ -47,12 +45,14 @@ function post() {
   delete cleanEnv.http_proxy;
   delete cleanEnv.https_proxy;
 
+  const args = ["s3", "cp", bundlePath, s3Uri];
+  if (s3Endpoint) {
+    args.push("--endpoint-url", s3Endpoint);
+  }
+
   console.log(`Uploading ${bundlePath} -> ${s3Uri}`);
   try {
-    run(`aws s3 cp "${bundlePath}" "${s3Uri}" ${endpointFlag}`, {
-      env: cleanEnv,
-      shell: os.platform() === "win32" ? true : "/bin/bash",
-    });
+    execFileSync("aws", args, { stdio: "inherit", env: cleanEnv });
     console.log(`Upload complete: ${s3Uri}`);
     appendOutput("s3-uri", s3Uri);
   } catch (e) {

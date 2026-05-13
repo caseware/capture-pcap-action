@@ -1,19 +1,28 @@
-const { execSync } = require("child_process");
-const fs = require("fs");
-const path = require("path");
-const os = require("os");
+const { execSync } = require("node:child_process");
+const crypto = require("node:crypto");
+const fs = require("node:fs");
+const path = require("node:path");
+const os = require("node:os");
 
 function appendOutput(key, value) {
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
-    fs.appendFileSync(outputFile, `${key}=${value}\n`);
+    const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
+    fs.appendFileSync(
+      outputFile,
+      `${key}<<${delimiter}\n${value}\n${delimiter}\n`
+    );
   }
 }
 
 function saveState(key, value) {
   const stateFile = process.env.GITHUB_STATE;
   if (stateFile) {
-    fs.appendFileSync(stateFile, `${key}=${value}\n`);
+    const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
+    fs.appendFileSync(
+      stateFile,
+      `${key}<<${delimiter}\n${value}\n${delimiter}\n`
+    );
   }
 }
 

@@ -76,7 +76,7 @@ Only capture traffic to your own services:
 |-------|---------|-------------|
 | `proxy-port` | `8080` | Port for the mitmproxy forward proxy |
 | `capture-dir` | `$RUNNER_TEMP/pcap-capture` | Directory for capture artifacts |
-| `process-name` | _(empty)_ | Best-effort process name filter (Linux only) |
+| `process-name` | _(empty)_ | _(reserved, not yet implemented)_ Process name filter |
 | `mitmproxy-version` | `11.1.3` | mitmproxy version to install |
 | `filter-domains` | _(empty)_ | Domain allowlist (comma-sep, globs OK, e.g. `*.caseware.com`) |
 | `filter-exclude-domains` | _(empty)_ | Domain denylist (comma-sep, globs OK) |
@@ -146,7 +146,7 @@ visibility, and the mitmproxy flows for the filtered view.
 | mitmproxy TLS interception | pip install | pip install |
 | Inline flow filtering | addon | addon |
 | Raw packet capture | tcpdump | netsh trace + etl2pcapng |
-| CA trust | update-ca-certificates | certutil |
+| CA trust | update-ca-certificates | Import-Certificate |
 | S3 upload (post step) | aws cli | aws cli |
 
 ## Integration with existing workflows

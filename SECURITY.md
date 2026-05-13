@@ -16,12 +16,12 @@ We will acknowledge receipt within 3 business days and aim to provide an initial
 
 ## Scope
 
-This policy covers the action source code (`start/action.yml`, `stop/action.yml`, `stop/src/main.js`, `stop/src/post.js`, `scripts/filter-addon.py`, `scripts/filter-pcap.py`) and the GitHub Actions workflow configurations in this repository.
+This policy covers the action source code (`start/action.yml`, `stop/action.yml`, `stop/src/main.js`, `stop/src/post.js`, `scripts/filter-addon.py`) and the GitHub Actions workflow configurations in this repository.
 
-Vulnerabilities in third-party components (mitmproxy, tshark, Docker images) should be reported to their respective maintainers.
+Vulnerabilities in third-party components (mitmproxy, Docker images) should be reported to their respective maintainers.
 
 ## Supported Versions
 
 | Version | Supported |
 |---------|-----------|
-| v0 (latest) | Yes |
+| v1 (latest) | Yes |
