@@ -95,6 +95,8 @@ runs:
       run: |
         echo "::group::Installing mitmproxy $MITMPROXY_VERSION"
         pip install --quiet mitmproxy=="${MITMPROXY_VERSION}"
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+        export PATH="$HOME/.local/bin:$PATH"
         mitmdump --version
         echo "::endgroup::"
 
@@ -106,6 +108,8 @@ runs:
       run: |
         Write-Host "::group::Installing mitmproxy $env:MITMPROXY_VERSION"
         pip install --quiet mitmproxy==$env:MITMPROXY_VERSION
+        $userScripts = Join-Path $env:APPDATA "Python" "Scripts"
+        if (Test-Path $userScripts) { echo $userScripts >> $env:GITHUB_PATH; $env:PATH = "$userScripts;$env:PATH" }
         mitmdump --version
         Write-Host "::endgroup::"
 
