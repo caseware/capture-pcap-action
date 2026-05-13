@@ -1,18 +1,18 @@
-const { execSync } = require("node:child_process");
+const { exec: execCb, spawn } = require("node:child_process");
+const { promisify } = require("node:util");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
 const path = require("node:path");
 const os = require("node:os");
 
-async function appendFile(filePath, content) {
-  await fs.appendFile(filePath, content);
-}
+const exec = promisify(execCb);
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function appendOutput(key, value) {
   const outputFile = process.env.GITHUB_OUTPUT;
   if (outputFile) {
     const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
-    await appendFile(outputFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
+    await fs.appendFile(outputFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
   }
 }
 
@@ -20,7 +20,7 @@ async function saveState(key, value) {
   const stateFile = process.env.GITHUB_STATE;
   if (stateFile) {
     const delimiter = `ghadelimiter_${crypto.randomUUID()}`;
-    await appendFile(stateFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
+    await fs.appendFile(stateFile, `${key}<<${delimiter}\n${value}\n${delimiter}\n`);
   }
 }
 
@@ -29,10 +29,10 @@ function getInput(name) {
   return (process.env[envName] || "").trim();
 }
 
-function run(cmd, opts = {}) {
+async function run(cmd, opts = {}) {
   console.log(`> ${cmd}`);
   try {
-    execSync(cmd, { stdio: "inherit", ...opts });
+    await exec(cmd, opts);
   } catch (e) {
     if (!opts.ignoreError) throw e;
   }
@@ -40,6 +40,19 @@ function run(cmd, opts = {}) {
 
 async function exists(p) {
   try { await fs.access(p); return true; } catch { return false; }
+}
+
+async function killProcess(pid, { sudo = false } = {}) {
+  const prefix = sudo ? "sudo " : "";
+  await run(`${prefix}kill ${pid} 2>/dev/null || true`, {
+    ignoreError: true,
+    shell: "/bin/bash",
+  });
+  await sleep(2000);
+  await run(`${prefix}kill -9 ${pid} 2>/dev/null || true`, {
+    ignoreError: true,
+    shell: "/bin/bash",
+  });
 }
 
 async function main() {
@@ -63,14 +76,9 @@ async function main() {
     const pid = (await fs.readFile(mitmdumpPidFile, "utf8")).trim();
     console.log(`Stopping mitmdump (PID ${pid})...`);
     if (os.platform() === "win32") {
-      run(`taskkill /PID ${pid} /F`, { ignoreError: true });
+      await run(`taskkill /PID ${pid} /F`, { ignoreError: true });
     } else {
-      run(`kill ${pid} || true`, { ignoreError: true, shell: "/bin/bash" });
-      run("sleep 2", { shell: "/bin/bash" });
-      run(`kill -9 ${pid} 2>/dev/null || true`, {
-        ignoreError: true,
-        shell: "/bin/bash",
-      });
+      await killProcess(pid);
     }
     await fs.unlink(mitmdumpPidFile);
     console.log("mitmdump stopped");
@@ -94,27 +102,19 @@ async function main() {
     if (await exists(tcpdumpPidFile)) {
       const pid = (await fs.readFile(tcpdumpPidFile, "utf8")).trim();
       console.log(`Stopping tcpdump (PID ${pid})...`);
-      run(`sudo kill ${pid} 2>/dev/null || true`, {
-        ignoreError: true,
-        shell: "/bin/bash",
-      });
-      run("sleep 2", { shell: "/bin/bash" });
-      run(`sudo kill -9 ${pid} 2>/dev/null || true`, {
-        ignoreError: true,
-        shell: "/bin/bash",
-      });
+      await killProcess(pid, { sudo: true });
       await fs.unlink(tcpdumpPidFile);
       console.log("tcpdump stopped");
     }
   } else {
     console.log("Stopping netsh trace...");
-    run("netsh trace stop", { ignoreError: true });
+    await run("netsh trace stop", { ignoreError: true });
 
     const etlFile = path.join(captureDir, "raw-capture.etl");
     const pcapFile = path.join(captureDir, "raw-capture.pcap");
     if (await exists(etlFile)) {
       try {
-        run(`etl2pcapng "${etlFile}" "${pcapFile}"`);
+        await run(`etl2pcapng "${etlFile}" "${pcapFile}"`);
       } catch {
         console.log("::warning::etl2pcapng not found; copying ETL as-is");
         await fs.copyFile(etlFile, pcapFile);
@@ -142,10 +142,8 @@ async function main() {
     console.log(`SSL keylog: ${sslKeylog} (${content.split("\n").length} keys)`);
   }
 
-  await Promise.all([
-    appendOutput("pcap-file", pcapFile),
-    appendOutput("sslkeylog-file", sslKeylog),
-  ]);
+  await appendOutput("pcap-file", pcapFile);
+  await appendOutput("sslkeylog-file", sslKeylog);
 
   // ── Create bundle ───────────────────────────────────────────────
   let artifactName = getInput("artifact-name");
@@ -173,11 +171,15 @@ async function main() {
   );
 
   const bundlePath = path.join(captureDir, `${artifactName}.tar.gz`);
-  if (os.platform() !== "win32") {
-    run(`tar -czf "${bundlePath}" -C "${bundleDir}" .`);
-  } else {
-    run(`tar -czf "${bundlePath}" -C "${bundleDir}" .`, { shell: true });
-  }
+  await new Promise((resolve, reject) => {
+    const tar = spawn("tar", ["-czf", bundlePath, "-C", bundleDir, "."], {
+      stdio: "inherit",
+    });
+    tar.on("close", (code) =>
+      code === 0 ? resolve() : reject(new Error(`tar exited with code ${code}`))
+    );
+    tar.on("error", reject);
+  });
 
   const bundleSize = (await exists(bundlePath))
     ? (await fs.stat(bundlePath)).size
@@ -194,7 +196,7 @@ async function main() {
       "NODE_EXTRA_CA_CERTS", "SSLKEYLOGFILE"
     ];
     const lines = vars.map((v) => `${v}=`).join("\n") + "\n";
-    await appendFile(envFile, lines);
+    await fs.appendFile(envFile, lines);
     console.log("Cleared proxy/CA env vars from GITHUB_ENV");
   }
 
