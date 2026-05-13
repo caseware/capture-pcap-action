@@ -1,6 +1,9 @@
-const { execFileSync } = require("node:child_process");
+const { execFile: execFileCb } = require("node:child_process");
+const { promisify } = require("node:util");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
+
+const execFile = promisify(execFileCb);
 
 function getState(key) {
   return (process.env[`STATE_${key}`] || "").trim();
@@ -58,7 +61,7 @@ async function post() {
 
   console.log(`Uploading ${bundlePath} -> ${s3Uri}`);
   try {
-    execFileSync("aws", args, { stdio: "inherit", env: cleanEnv });
+    await execFile("aws", args, { env: cleanEnv });
     console.log(`Upload complete: ${s3Uri}`);
     await appendOutput("s3-uri", s3Uri);
   } catch (e) {
