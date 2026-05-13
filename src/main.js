@@ -27,7 +27,8 @@ function saveState(key, value) {
 }
 
 function getInput(name) {
-  const envName = `INPUT_${name.replace(/-/g, "_").toUpperCase()}`;
+  // Match @actions/core: only spaces are replaced, hyphens stay
+  const envName = `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
   return (process.env[envName] || "").trim();
 }
 
@@ -160,6 +161,20 @@ function main() {
   console.log(`Bundle: ${bundlePath} (${bundleSize} bytes)`);
 
   appendOutput("bundle-path", bundlePath);
+
+  // ── Clear proxy env vars so later steps connect directly ────────
+  const envFile = process.env.GITHUB_ENV;
+  if (envFile) {
+    const vars = [
+      "HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy",
+      "NO_PROXY", "no_proxy",
+      "NODE_EXTRA_CA_CERTS", "REQUESTS_CA_BUNDLE",
+      "SSL_CERT_FILE", "CURL_CA_BUNDLE", "SSLKEYLOGFILE"
+    ];
+    const lines = vars.map((v) => `${v}=`).join("\n") + "\n";
+    fs.appendFileSync(envFile, lines);
+    console.log("Cleared proxy/CA env vars from GITHUB_ENV");
+  }
 
   // ── Save state for post step (S3 upload) ────────────────────────
   saveState("bundle-path", bundlePath);
