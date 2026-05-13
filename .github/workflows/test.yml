@@ -122,13 +122,6 @@ jobs:
             -o /dev/null -w "example.com: HTTP %{http_code}\n" \
             https://example.com
 
-          # github.com is MITM-intercepted like all traffic; the CA is
-          # trusted system-wide via update-ca-certificates.
-          curl -sS --max-time 15 \
-            --cacert "$CA_CERT" \
-            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
-            https://github.com
-
           echo "=== Test requests complete ==="
 
       # ── Stop capture ───────────────────────────────────────────────
