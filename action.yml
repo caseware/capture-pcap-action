@@ -228,18 +228,11 @@ runs:
           echo "::warning::Filter addon not found at $ADDON_PATH"
         fi
 
-        # Build --allow-hosts from filter-domains so only target domains
-        # get TLS-intercepted; everything else is TCP-tunneled transparently.
-        ALLOW_FLAGS=""
-        if [ -n "$PCAP_FILTER_DOMAINS" ]; then
-          IFS=',' read -ra DOMAINS <<< "$PCAP_FILTER_DOMAINS"
-          for d in "${DOMAINS[@]}"; do
-            d=$(echo "$d" | xargs)  # trim
-            regex=$(echo "$d" | sed 's/\./\\./g; s/\*/.*/g')
-            ALLOW_FLAGS="$ALLOW_FLAGS --allow-hosts $regex"
-          done
-          echo "allow-hosts regexes: $ALLOW_FLAGS"
-        fi
+        # All traffic is MITM-intercepted (the mitmproxy CA is trusted
+        # system-wide via update-ca-certificates and NODE_EXTRA_CA_CERTS).
+        # The filter addon handles domain selection for the capture file.
+        # NOTE: --allow-hosts was removed because its TCP passthrough mode
+        # causes ECONNRESET on CONNECT tunnels (e.g. NX Cloud heartbeat).
 
         mitmdump \
           --mode regular \
@@ -248,15 +241,13 @@ runs:
           --set ssl_insecure=true \
           --save-stream-file "$CAPTURE_DIR/mitmproxy-flows" \
           $ADDON_FLAG \
-          $ALLOW_FLAGS \
           --quiet \
           > "$CAPTURE_DIR/mitmdump-stdout.log" 2>&1 &
         MITM_PID=$!
         echo "$MITM_PID" > "$CAPTURE_DIR/mitmdump.pid"
         echo "mitmdump PID: $MITM_PID"
 
-        # Wait for proxy to be ready (TCP port check — mitm.it HTTP
-        # check is unreliable when --allow-hosts filters non-target domains).
+        # Wait for proxy to be ready (TCP port check).
         READY=false
         for i in $(seq 1 30); do
           if ! kill -0 "$MITM_PID" 2>/dev/null; then
@@ -308,17 +299,6 @@ runs:
           Write-Host "Filter addon: $addonPath"
         }
 
-        # Build --allow-hosts from filter-domains
-        $allowArgs = @()
-        if ($env:PCAP_FILTER_DOMAINS) {
-          foreach ($d in $env:PCAP_FILTER_DOMAINS.Split(',')) {
-            $d = $d.Trim()
-            $regex = $d -replace '\.','\.' -replace '\*','.*'
-            $allowArgs += @("--allow-hosts", $regex)
-          }
-          Write-Host "allow-hosts regexes: $($allowArgs -join ' ')"
-        }
-
         $allArgs = @(
           "--mode", "regular",
           "--listen-port", $env:PROXY_PORT,
@@ -326,7 +306,7 @@ runs:
           "--set", "ssl_insecure=true",
           "--save-stream-file", (Join-Path $env:CAPTURE_DIR "mitmproxy-flows"),
           "--quiet"
-        ) + $addonArgs + $allowArgs
+        ) + $addonArgs
 
         $proc = Start-Process -PassThru -NoNewWindow -FilePath "mitmdump" `
           -ArgumentList $allArgs
@@ -356,12 +336,28 @@ runs:
         }
         Write-Host "::endgroup::"
 
+    # ── Trust CA in Java truststore (if JAVA_HOME is set) ────────────
+    - name: Trust CA (Java)
+      if: runner.os == 'Linux' && env.PCAP_PROXY_READY == 'true'
+      shell: bash
+      env:
+        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
+      run: |
+        if command -v keytool >/dev/null 2>&1 && [ -n "$JAVA_HOME" ]; then
+          CACERTS="$JAVA_HOME/lib/security/cacerts"
+          if [ -f "$CACERTS" ]; then
+            echo "Adding mitmproxy CA to Java truststore: $CACERTS"
+            sudo keytool -importcert -noprompt \
+              -keystore "$CACERTS" -storepass changeit \
+              -alias mitmproxy-ca \
+              -file "$MITMPROXY_HOME/mitmproxy-ca-cert.pem" 2>/dev/null || true
+          fi
+        fi
+
     # ── Export proxy settings ──────────────────────────────────────────
-    # Only HTTP_PROXY/HTTPS_PROXY and NODE_EXTRA_CA_CERTS are set.
-    # Non-intercepted hosts are TCP-tunneled by mitmproxy (--allow-hosts),
-    # so NO_PROXY and bulk CA overrides (REQUESTS_CA_BUNDLE, etc.) are
-    # not needed — the system trust store (updated by update-ca-certificates)
-    # already contains the mitmproxy CA.
+    # All TLS traffic is MITM-intercepted. The mitmproxy CA is trusted
+    # system-wide (update-ca-certificates), for Node.js (NODE_EXTRA_CA_CERTS),
+    # and for Java (keytool import above).
     - name: Configure proxy environment
       if: env.PCAP_PROXY_READY == 'true'
       shell: bash
