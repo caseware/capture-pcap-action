@@ -1,0 +1,54 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main, init-main, v1]
+  pull_request:
+    branches: [main, init-main, v1]
+  schedule:
+    - cron: '0 8 * * 1'
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04-arm
+    env:
+      CODEQL_ACTION_EXTRA_OPTIONS: '{"database":{"init":["--no-calculate-baseline"]}}'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - language: python
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup CodeQL (ARM64 compat)
+        uses: caseware/codeql-arm64-compat@v1
+        with:
+          enable-compiled-languages: 'false'
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v4
+        with:
+          category: "/language:${{ matrix.language }}"

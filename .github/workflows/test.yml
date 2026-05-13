@@ -1,0 +1,333 @@
+name: Integration Test
+
+on:
+  push:
+    branches: [main, init-main, v1]
+  pull_request:
+    branches: [main, init-main, v1]
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  version-bump:
+    name: Version bump check
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate VERSION bump
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ ! -f VERSION ]; then
+            echo "::error::VERSION file is missing"
+            exit 1
+          fi
+
+          if ! grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' VERSION; then
+            echo "::error::VERSION must be strict semver (e.g. 1.2.3)"
+            exit 1
+          fi
+
+          git fetch --no-tags origin "$BASE_REF":"refs/remotes/origin/$BASE_REF"
+
+          if git diff --quiet "refs/remotes/origin/$BASE_REF"...HEAD -- VERSION; then
+            echo "::error::VERSION must be bumped in pull requests"
+            exit 1
+          fi
+
+          echo "VERSION bump detected: $(cat VERSION)"
+
+  # ───────────────────────────────────────────────────────────────────
+  # Integration test: capture HTTPS traffic -> verify PCAP -> upload to MinIO
+  # ───────────────────────────────────────────────────────────────────
+  test-linux:
+    name: "Integration test (Linux)"
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start MinIO
+        run: |
+          docker run -d --name minio \
+            -p 9000:9000 -p 9001:9001 \
+            -e MINIO_ROOT_USER=minioadmin \
+            -e MINIO_ROOT_PASSWORD=minioadmin \
+            minio/minio:latest server /data --console-address ":9001"
+
+          for i in $(seq 1 30); do
+            if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1; then
+              echo "MinIO is ready"
+              break
+            fi
+            echo "Waiting for MinIO... ($i/30)"
+            sleep 2
+          done
+
+      - name: Create MinIO bucket
+        run: |
+          curl -sL https://dl.min.io/client/mc/release/linux-arm64/mc \
+            -o /usr/local/bin/mc
+          chmod +x /usr/local/bin/mc
+          mc alias set local http://localhost:9000 minioadmin minioadmin
+          mc mb local/test-pcap-bucket
+
+      - name: Configure AWS CLI for MinIO
+        run: |
+          aws configure set aws_access_key_id minioadmin
+          aws configure set aws_secret_access_key minioadmin
+          aws configure set default.region us-east-1
+
+      - name: Install tshark for PCAP analysis
+        run: |
+          sudo DEBIAN_FRONTEND=noninteractive apt-get update -qq
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq tshark
+
+      # ── Start capture (with domain filter) ─────────────────────────
+      - name: Start PCAP capture
+        uses: ./start
+        id: pcap-start
+        with:
+          filter-domains: '*.google.com,example.com'
+
+      # ── Make HTTPS requests through the proxy ──────────────────────
+      - name: Make test HTTPS requests (via proxy)
+        run: |
+          echo "=== Testing HTTPS via proxy ==="
+          echo "HTTP_PROXY=$HTTP_PROXY"
+          echo "HTTPS_PROXY=$HTTPS_PROXY"
+
+          CA_CERT="${{ steps.pcap-start.outputs.ca-cert }}"
+
+          curl -sS --max-time 15 \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "google.com: HTTP %{http_code}\n" \
+            https://www.google.com
+
+          curl -sS --max-time 15 \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "example.com: HTTP %{http_code}\n" \
+            https://example.com
+
+          # This request goes through the proxy but is killed by the
+          # filter addon since github.com is not in the allowlist.
+          curl -sS --max-time 15 \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
+            https://github.com 2>&1 || echo "(filtered by addon — expected)"
+
+          echo "=== Test requests complete ==="
+
+      # ── Stop capture ───────────────────────────────────────────────
+      # main.js stops capture and bundles; post.js uploads to S3.
+      - name: Stop capture and register S3 upload
+        uses: ./stop
+        id: pcap-stop
+        with:
+          s3-bucket: test-pcap-bucket
+          s3-prefix: integration-test/${{ github.run_id }}
+          s3-endpoint: http://localhost:9000
+          artifact-name: test-capture
+
+      # ── Verify PCAP ────────────────────────────────────────────────
+      - name: Verify PCAP file exists and contains traffic
+        env:
+          PCAP_FILE: ${{ steps.pcap-stop.outputs.pcap-file }}
+          SSLKEYLOG_FILE: ${{ steps.pcap-stop.outputs.sslkeylog-file }}
+        run: |
+          echo "=== Verifying PCAP ==="
+
+          if [ ! -f "$PCAP_FILE" ]; then
+            echo "::error::PCAP file not found: $PCAP_FILE"
+            exit 1
+          fi
+
+          PCAP_SIZE=$(stat -c%s "$PCAP_FILE")
+          echo "PCAP size: $PCAP_SIZE bytes"
+          if [ "$PCAP_SIZE" -lt 100 ]; then
+            echo "::error::PCAP file is too small ($PCAP_SIZE bytes)"
+            exit 1
+          fi
+
+          if [ ! -f "$SSLKEYLOG_FILE" ]; then
+            echo "::error::SSL keylog file not found: $SSLKEYLOG_FILE"
+            exit 1
+          fi
+
+          KEY_COUNT=$(wc -l < "$SSLKEYLOG_FILE")
+          echo "SSL keys captured: $KEY_COUNT"
+          if [ "$KEY_COUNT" -lt 1 ]; then
+            echo "::error::No SSL keys captured"
+            exit 1
+          fi
+
+          PACKET_COUNT=$(tshark -r "$PCAP_FILE" -T fields -e frame.number 2>/dev/null | wc -l)
+          echo "Packets in PCAP: $PACKET_COUNT"
+          if [ "$PACKET_COUNT" -lt 10 ]; then
+            echo "::error::PCAP contains too few packets ($PACKET_COUNT)"
+            exit 1
+          fi
+
+          # TLS decryption test
+          DECRYPTED=$(tshark -r "$PCAP_FILE" \
+            -o "tls.keylog_file:$SSLKEYLOG_FILE" \
+            -Y "http || http2" \
+            -T fields -e http.host -e http2.headers.authority \
+            2>/dev/null | sort -u | head -20 || true)
+          echo "Decrypted HTTP hosts:"
+          echo "$DECRYPTED"
+
+          echo "=== PCAP verification passed ==="
+
+      # The S3 upload happens in the stop action's post step (post.js).
+      # Verify it after the post step runs — use a second job or check
+      # in a subsequent workflow_run. For this test, we verify the bundle
+      # was created locally.
+      - name: Verify bundle was created
+        run: |
+          BUNDLE="${{ steps.pcap-stop.outputs.bundle-path }}"
+          if [ ! -f "$BUNDLE" ]; then
+            echo "::error::Bundle not found: $BUNDLE"
+            exit 1
+          fi
+          echo "Bundle contents:"
+          tar -tzf "$BUNDLE"
+          echo "Bundle size: $(stat -c%s "$BUNDLE") bytes"
+
+  # ───────────────────────────────────────────────────────────────────
+  # Test without filters (all traffic)
+  # ───────────────────────────────────────────────────────────────────
+  test-linux-unfiltered:
+    name: "Integration test (Linux, no filter)"
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start PCAP capture (no filter)
+        uses: ./start
+        id: pcap-start
+
+      - name: Make test HTTPS requests
+        run: |
+          CA_CERT="${{ steps.pcap-start.outputs.ca-cert }}"
+          curl -sS --max-time 15 --cacert "$CA_CERT" \
+            -o /dev/null -w "google.com: HTTP %{http_code}\n" \
+            https://www.google.com
+          curl -sS --max-time 15 --cacert "$CA_CERT" \
+            -o /dev/null -w "example.com: HTTP %{http_code}\n" \
+            https://example.com
+
+      - name: Stop capture
+        uses: ./stop
+        id: pcap-stop
+        with:
+          s3-bucket: dummy-bucket
+          s3-endpoint: http://localhost:9999
+          artifact-name: unfiltered-test
+        continue-on-error: true
+
+      - name: Verify capture artifacts
+        run: |
+          CAPTURE_DIR="$PCAP_CAPTURE_DIR"
+          echo "Capture dir: $CAPTURE_DIR"
+          ls -lah "$CAPTURE_DIR/"
+
+          [ -f "$CAPTURE_DIR/raw-capture.pcap" ] && echo "PCAP: OK" || echo "::error::PCAP missing"
+          [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::error::SSL keys missing"
+          [ -f "$CAPTURE_DIR/mitmproxy-flows" ] && echo "Flows: OK" || echo "::error::Flows missing"
+
+  test-windows:
+    name: "Integration test (Windows)"
+    runs-on: windows-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Start PCAP capture
+        uses: ./start
+        id: pcap-start
+
+      - name: Make test HTTPS requests (via proxy)
+        shell: pwsh
+        run: |
+          Write-Host "=== Testing HTTPS via proxy ==="
+          Write-Host "HTTP_PROXY=$env:HTTP_PROXY"
+
+          try {
+            $resp = Invoke-WebRequest -Uri "https://www.google.com" `
+              -MaximumRedirection 5 -TimeoutSec 15 `
+              -SkipCertificateCheck
+            Write-Host "google.com: HTTP $($resp.StatusCode)"
+          } catch {
+            Write-Host "google.com request failed: $_"
+          }
+
+          try {
+            $resp = Invoke-WebRequest -Uri "https://example.com" `
+              -MaximumRedirection 5 -TimeoutSec 15 `
+              -SkipCertificateCheck
+            Write-Host "example.com: HTTP $($resp.StatusCode)"
+          } catch {
+            Write-Host "example.com request failed: $_"
+          }
+
+          Write-Host "=== Test requests complete ==="
+
+      - name: Stop capture
+        uses: ./stop
+        id: pcap-stop
+        with:
+          s3-bucket: dummy-bucket
+          s3-endpoint: http://localhost:9999
+        continue-on-error: true
+
+      - name: Verify capture artifacts (Windows)
+        if: always()
+        shell: pwsh
+        run: |
+          $captureDir = $env:PCAP_CAPTURE_DIR
+          Write-Host "Capture dir: $captureDir"
+          Get-ChildItem $captureDir -Recurse -ErrorAction SilentlyContinue | Format-Table Name, Length
+
+          if (Test-Path (Join-Path $captureDir "mitmproxy-flows")) {
+            Write-Host "mitmproxy flows: OK"
+          } else {
+            Write-Host "::warning::mitmproxy flows not found"
+          }
+
+          if (Test-Path (Join-Path $captureDir "sslkeys.log")) {
+            $keys = (Get-Content (Join-Path $captureDir "sslkeys.log")).Count
+            Write-Host "SSL keys captured: $keys"
+          } else {
+            Write-Host "::warning::SSL keylog not found"
+          }

@@ -1,0 +1,54 @@
+name: Commitlint
+
+on:
+  pull_request:
+    branches: [main, init-main, v1]
+    types: [opened, synchronize, reopened, edited]
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  commitlint:
+    name: Validate commits and PR title
+    runs-on: ubuntu-24.04-arm
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha }}
+
+      - name: Run commitlint on commit range and PR title
+        shell: bash
+        env:
+          BASE_REF: ${{ github.base_ref }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: |
+          git fetch --no-tags origin "$BASE_REF":"refs/remotes/origin/$BASE_REF"
+
+          npm init -y >/dev/null 2>&1 || true
+          npm install --no-save @commitlint/cli@19.8.1 @commitlint/config-conventional@19.8.1
+
+          cat > ./commitlint.ci.config.mjs << 'EOF'
+          export default {
+            extends: ['@commitlint/config-conventional'],
+            rules: {
+              'body-max-line-length': [2, 'always', 100],
+            },
+          };
+          EOF
+
+          npx commitlint \
+            --config ./commitlint.ci.config.mjs \
+            --from "refs/remotes/origin/$BASE_REF" \
+            --to "$HEAD_SHA"
+
+          printf '%s\n' "$PR_TITLE" \
+            | npx commitlint --config ./commitlint.ci.config.mjs
