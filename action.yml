@@ -93,20 +93,23 @@ runs:
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
       run: |
-        echo "::group::Installing mitmproxy $MITMPROXY_VERSION (standalone binary)"
         ARCH=$(uname -m)
-        case "$ARCH" in
-          x86_64)  ARCH_SUFFIX="x86_64" ;;
-          aarch64) ARCH_SUFFIX="aarch64" ;;
-          arm64)   ARCH_SUFFIX="aarch64" ;;
-          *)       echo "::error::Unsupported architecture: $ARCH"; exit 1 ;;
-        esac
-        DOWNLOAD_URL="https://downloads.mitmproxy.org/${MITMPROXY_VERSION}/mitmproxy-${MITMPROXY_VERSION}-linux-${ARCH_SUFFIX}.tar.gz"
         INSTALL_DIR="$HOME/.local/bin"
         mkdir -p "$INSTALL_DIR"
-        echo "Downloading $DOWNLOAD_URL"
-        curl -fsSL "$DOWNLOAD_URL" | tar -xz -C "$INSTALL_DIR" mitmdump
-        chmod +x "$INSTALL_DIR/mitmdump"
+
+        if [ "$ARCH" = "x86_64" ]; then
+          # x86_64: use standalone binary (works on any Python version)
+          echo "::group::Installing mitmproxy $MITMPROXY_VERSION (standalone binary)"
+          DOWNLOAD_URL="https://downloads.mitmproxy.org/${MITMPROXY_VERSION}/mitmproxy-${MITMPROXY_VERSION}-linux-x86_64.tar.gz"
+          echo "Downloading $DOWNLOAD_URL"
+          curl -fsSL "$DOWNLOAD_URL" | tar -xz -C "$INSTALL_DIR" mitmdump
+          chmod +x "$INSTALL_DIR/mitmdump"
+        else
+          # ARM64 / other: standalone binary not available, use pip
+          echo "::group::Installing mitmproxy $MITMPROXY_VERSION (pip — ARM64)"
+          pip install --user "mitmproxy==$MITMPROXY_VERSION"
+        fi
+
         echo "$INSTALL_DIR" >> "$GITHUB_PATH"
         export PATH="$INSTALL_DIR:$PATH"
         mitmdump --version
