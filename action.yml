@@ -292,6 +292,6 @@ runs:
           echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
           echo "REQUESTS_CA_BUNDLE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
           echo "SSL_CERT_FILE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
-          echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
+          echo "CURL_CA_BUNDLE=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
         } >> "$GITHUB_ENV"
         echo "Proxy configured at $PROXY_URL"
