@@ -42,6 +42,15 @@ async function exists(p) {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
+async function isProcessAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 async function killProcess(pid, { sudo = false } = {}) {
   const prefix = sudo ? "sudo " : "";
   await run(`${prefix}kill ${pid} 2>/dev/null || true`, {
@@ -53,6 +62,25 @@ async function killProcess(pid, { sudo = false } = {}) {
     ignoreError: true,
     shell: "/bin/bash",
   });
+}
+
+async function stopFluxzyProcess(pid) {
+  if (os.platform() === "win32") {
+    await run(`taskkill /PID ${pid} /T 2>nul || taskkill /PID ${pid} /T /F`, {
+      ignoreError: true,
+    });
+    return;
+  }
+
+  await run(`kill -INT ${pid} 2>/dev/null || true`, {
+    ignoreError: true,
+    shell: "/bin/bash",
+  });
+  await sleep(5000);
+
+  if (await isProcessAlive(pid)) {
+    await killProcess(pid);
+  }
 }
 
 async function main() {
@@ -85,8 +113,8 @@ async function main() {
   if (await exists(pidFile)) {
     const pid = (await fs.readFile(pidFile, "utf8")).trim();
     console.log(`Stopping ${proxyTool} (PID ${pid})...`);
-    if (os.platform() === "win32") {
-      await run(`taskkill /PID ${pid} /T /F`, { ignoreError: true });
+    if (proxyTool === "fluxzy") {
+      await stopFluxzyProcess(pid);
     } else {
       await killProcess(pid);
     }

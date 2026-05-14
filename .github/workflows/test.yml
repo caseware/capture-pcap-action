@@ -150,9 +150,7 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: test-pcap-bucket
-          s3-prefix: integration-test/${{ github.run_id }}
-          s3-endpoint: http://localhost:9000
+          s3-bucket: ''
           artifact-name: test-capture
 
       - name: Assert domain filtering in proxy output
@@ -322,8 +320,7 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: dummy-bucket
-          s3-endpoint: http://localhost:9999
+          s3-bucket: ''
           artifact-name: unfiltered-test
         continue-on-error: true
 
@@ -387,8 +384,7 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: dummy-bucket
-          s3-endpoint: http://localhost:9999
+          s3-bucket: ''
         continue-on-error: true
 
       - name: Verify capture artifacts (Windows)
@@ -454,8 +450,7 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: dummy-bucket
-          s3-endpoint: http://localhost:9999
+          s3-bucket: ''
           artifact-name: macos-test
         continue-on-error: true
 
