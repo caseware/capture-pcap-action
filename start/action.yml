@@ -242,7 +242,7 @@ runs:
         FLUXZY_HOME: ${{ steps.setup-dirs.outputs.fluxzy-home }}
       run: |
         CERT_PATH="$FLUXZY_HOME/fluxzy-ca.crt"
-        fluxzy cert export "$CERT_PATH"
+        npx --yes @fluxzy/cli cert export "$CERT_PATH"
         if ! openssl x509 -in "$CERT_PATH" -noout -subject -dates >/dev/null 2>&1; then
           if openssl x509 -inform DER -in "$CERT_PATH" -out "$CERT_PATH.pem" >/dev/null 2>&1; then
             mv "$CERT_PATH.pem" "$CERT_PATH"
@@ -350,13 +350,14 @@ runs:
         $env:SSLKEYLOGFILE = $sslKeyLog
 
         $allArgs = @(
+          "@fluxzy/cli",
           "start",
           "-l", "127.0.0.1:$env:PROXY_PORT",
           "-k",
           "-o", (Join-Path $env:CAPTURE_DIR "fluxzy-capture.har")
         )
 
-        $proc = Start-Process -PassThru -NoNewWindow -FilePath "fluxzy" `
+        $proc = Start-Process -PassThru -NoNewWindow -FilePath "npx.cmd" `
           -ArgumentList $allArgs
         $proc.Id | Out-File -FilePath (Join-Path $env:CAPTURE_DIR "fluxzy.pid") -NoNewline
         Write-Host "fluxzy PID: $($proc.Id)"
