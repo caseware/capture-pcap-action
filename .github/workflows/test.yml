@@ -178,6 +178,8 @@ jobs:
               return host == blocked_suffix or host.endswith(f".{blocked_suffix}")
 
           hosts = set()
+          allowed_success = set()
+          blocked_success = []
 
           if proxy_tool == "mitmproxy":
               flows_path = os.path.join(capture_dir, "mitmproxy-flows")
@@ -191,7 +193,15 @@ jobs:
                   for flow in FlowReader(f).stream():
                       req = getattr(flow, "request", None)
                       if req is not None and getattr(req, "host", None):
-                          hosts.add(req.host.lower())
+                      host = req.host.lower()
+                      hosts.add(host)
+
+                      resp = getattr(flow, "response", None)
+                      status = int(getattr(resp, "status_code", 0) or 0)
+                      if status > 0 and host_is_allowed(host):
+                        allowed_success.add(host)
+                      if status > 0 and host_is_blocked(host):
+                        blocked_success.append((host, status))
           elif proxy_tool == "fluxzy":
               har_path = os.path.join(capture_dir, "fluxzy-capture.har")
               if not os.path.exists(har_path):
@@ -205,21 +215,28 @@ jobs:
                   host = (urlparse(url).hostname or "").lower()
                   if host:
                       hosts.add(host)
+                    status = int(entry.get("response", {}).get("status", 0) or 0)
+                    if status > 0 and host_is_allowed(host):
+                      allowed_success.add(host)
+                    if status > 0 and host_is_blocked(host):
+                      blocked_success.append((host, status))
           else:
               print(f"::error::Unsupported proxy tool in test: {proxy_tool}")
               sys.exit(1)
 
-          allowed_seen = sorted(h for h in hosts if host_is_allowed(h))
-          blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
+            allowed_seen = sorted(h for h in hosts if host_is_allowed(h))
+            blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
 
           print(f"Captured hosts ({proxy_tool}): {sorted(hosts)}")
+            if blocked_seen:
+              print(f"Blocked hosts observed as attempts ({proxy_tool}): {blocked_seen}")
 
-          if not allowed_seen:
-              print("::error::No allowed domains were captured in proxy output")
+            if not allowed_success:
+              print("::error::No successful allowed-domain traffic was captured in proxy output")
               sys.exit(1)
 
-          if blocked_seen:
-              print(f"::error::Blocked domain(s) unexpectedly captured: {blocked_seen}")
+            if blocked_success:
+              print(f"::error::Blocked domain(s) unexpectedly received responses: {blocked_success}")
               sys.exit(1)
           PY
 
