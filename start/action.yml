@@ -150,12 +150,10 @@ runs:
         NPM_CONFIG_CACHE: ${{ runner.temp }}/pcap-tools/npm-cache
       run: |
         echo "::group::Installing Fluxzy CLI"
-        if [ "${{ steps.fluxzy-cache.outputs.cache-hit }}" != "true" ]; then
-          if [ "$FLUXZY_VERSION" = "latest" ]; then
-            npm install -g @fluxzy/cli
-          else
-            npm install -g "@fluxzy/cli@$FLUXZY_VERSION"
-          fi
+        if [ "$FLUXZY_VERSION" = "latest" ]; then
+          npm install -g @fluxzy/cli
+        else
+          npm install -g "@fluxzy/cli@$FLUXZY_VERSION"
         fi
 
         fluxzy --help >/dev/null

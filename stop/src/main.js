@@ -122,7 +122,11 @@ async function main() {
     if (proxyTool === "fluxzy") {
       await stopFluxzyProcess(pid);
     } else {
-      await killProcess(pid);
+      if (os.platform() === "win32") {
+        await run(`taskkill /PID ${pid} /F`, { ignoreError: true });
+      } else {
+        await killProcess(pid);
+      }
     }
     await fs.unlink(pidFile);
     console.log(`${proxyTool} stopped`);
