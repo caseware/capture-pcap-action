@@ -134,6 +134,14 @@ runs:
         echo "PCAP_FILTER_MAX_BODY_SIZE=$INPUT_FILTER_MAX_BODY_SIZE" >> "$GITHUB_ENV"
 
     # ── Install proxy tool ──────────────────────────────────────────────
+    - name: Cache Fluxzy install
+      if: inputs.proxy-tool == 'fluxzy'
+      uses: actions/cache@v4
+      id: fluxzy-cache
+      with:
+        path: ${{ runner.temp }}/pcap-tools/fluxzy/${{ inputs.fluxzy-version }}/${{ runner.os }}
+        key: fluxzy-${{ runner.os }}-${{ inputs.fluxzy-version }}
+
     - name: Install Fluxzy
       if: inputs.proxy-tool == 'fluxzy'
       shell: bash
@@ -141,13 +149,29 @@ runs:
         FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
       run: |
         echo "::group::Installing Fluxzy CLI"
-        if [ "$FLUXZY_VERSION" = "latest" ]; then
-          npm install -g @fluxzy/cli
-        else
-          npm install -g "@fluxzy/cli@$FLUXZY_VERSION"
+        FLUXZY_INSTALL_DIR="${RUNNER_TEMP:-/tmp}/pcap-tools/fluxzy/${FLUXZY_VERSION}/${RUNNER_OS}"
+        echo "$FLUXZY_INSTALL_DIR/node_modules/.bin" >> "$GITHUB_PATH"
+        export PATH="$FLUXZY_INSTALL_DIR/node_modules/.bin:$PATH"
+
+        if [ "${{ steps.fluxzy-cache.outputs.cache-hit }}" != "true" ]; then
+          mkdir -p "$FLUXZY_INSTALL_DIR"
+          if [ "$FLUXZY_VERSION" = "latest" ]; then
+            npm install --prefix "$FLUXZY_INSTALL_DIR" @fluxzy/cli
+          else
+            npm install --prefix "$FLUXZY_INSTALL_DIR" "@fluxzy/cli@$FLUXZY_VERSION"
+          fi
         fi
+
         fluxzy --help >/dev/null
         echo "::endgroup::"
+
+    - name: Cache mitmproxy install
+      if: inputs.proxy-tool == 'mitmproxy'
+      uses: actions/cache@v4
+      id: mitmproxy-cache
+      with:
+        path: ${{ runner.temp }}/pcap-tools/mitmproxy/${{ inputs.mitmproxy-version }}/${{ runner.os }}
+        key: mitmproxy-${{ runner.os }}-${{ inputs.mitmproxy-version }}
 
     - name: Install mitmproxy
       if: inputs.proxy-tool == 'mitmproxy'
@@ -170,19 +194,28 @@ runs:
           exit 1
         fi
 
-        MITM_VENV="$CAPTURE_DIR/.mitmproxy-venv"
-        "${PYTHON_CMD[@]}" -m venv "$MITM_VENV"
+        MITM_VENV="${RUNNER_TEMP:-/tmp}/pcap-tools/mitmproxy/${MITMPROXY_VERSION}/${RUNNER_OS}"
+
+        if [ "${{ steps.mitmproxy-cache.outputs.cache-hit }}" != "true" ]; then
+          "${PYTHON_CMD[@]}" -m venv "$MITM_VENV"
+
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            VENV_BIN="$MITM_VENV/Scripts"
+            VENV_PY="$VENV_BIN/python.exe"
+          else
+            VENV_BIN="$MITM_VENV/bin"
+            VENV_PY="$VENV_BIN/python"
+          fi
+
+          "$VENV_PY" -m pip install --upgrade pip
+          "$VENV_PY" -m pip install "mitmproxy==$MITMPROXY_VERSION"
+        fi
 
         if [ "$RUNNER_OS" = "Windows" ]; then
           VENV_BIN="$MITM_VENV/Scripts"
-          VENV_PY="$VENV_BIN/python.exe"
         else
           VENV_BIN="$MITM_VENV/bin"
-          VENV_PY="$VENV_BIN/python"
         fi
-
-        "$VENV_PY" -m pip install --upgrade pip
-        "$VENV_PY" -m pip install "mitmproxy==$MITMPROXY_VERSION"
 
         echo "$VENV_BIN" >> "$GITHUB_PATH"
         export PATH="$VENV_BIN:$PATH"
@@ -225,7 +258,7 @@ runs:
         FLUXZY_HOME: ${{ steps.setup-dirs.outputs.fluxzy-home }}
       run: |
         CERT_PATH="$FLUXZY_HOME/fluxzy-ca.crt"
-        npx --yes @fluxzy/cli cert export "$CERT_PATH"
+        fluxzy cert export "$CERT_PATH"
         if ! openssl x509 -in "$CERT_PATH" -noout -subject -dates >/dev/null 2>&1; then
           if openssl x509 -inform DER -in "$CERT_PATH" -out "$CERT_PATH.pem" >/dev/null 2>&1; then
             mv "$CERT_PATH.pem" "$CERT_PATH"
