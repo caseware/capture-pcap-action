@@ -135,8 +135,7 @@ async function main() {
   const pcapFile = path.join(captureDir, "raw-capture.pcap");
   const sslKeylog = path.join(captureDir, "sslkeys.log");
   const caCert = process.env.PCAP_CA_CERT || path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
-  const flowsFile = path.join(captureDir, "mitmproxy-flows");
-  const fluxzyHarFile = path.join(captureDir, "fluxzy-capture.har");
+  const harFile = path.join(captureDir, "capture.har");
 
   const hasRawCapture = await exists(pcapFile);
 
@@ -167,7 +166,7 @@ async function main() {
 
   // Always include proxy capture output; only include raw PCAP, SSL keys,
   // and CA cert when raw capture was active (tcpdump/netsh produced a file).
-  const bundleFiles = proxyTool === "fluxzy" ? [fluxzyHarFile] : [flowsFile];
+  const bundleFiles = [harFile];
   if (hasRawCapture) {
     bundleFiles.push(pcapFile, sslKeylog, caCert);
   }

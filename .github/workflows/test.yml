@@ -166,76 +166,53 @@ jobs:
           import sys
           from urllib.parse import urlparse
 
-          proxy_tool = os.environ["PROXY_TOOL"]
           capture_dir = os.environ["CAPTURE_DIR"]
+          proxy_tool = os.environ["PROXY_TOOL"]
           allowed_suffixes = ("google.com", "example.com")
           blocked_suffix = "github.com"
 
           def host_is_allowed(host: str) -> bool:
-              return any(host == s or host.endswith(f".{s}") for s in allowed_suffixes)
+              return any(host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes)
 
           def host_is_blocked(host: str) -> bool:
               return host == blocked_suffix or host.endswith(f".{blocked_suffix}")
+
+          har_path = os.path.join(capture_dir, "capture.har")
+          if not os.path.exists(har_path):
+              print(f"::error::Missing HAR file: {har_path}")
+              sys.exit(1)
+
+          with open(har_path, "r", encoding="utf-8") as f:
+              har = json.load(f)
 
           hosts = set()
           allowed_success = set()
           blocked_success = []
 
-          if proxy_tool == "mitmproxy":
-              flows_path = os.path.join(capture_dir, "mitmproxy-flows")
-              if not os.path.exists(flows_path):
-                  print(f"::error::Missing mitmproxy flows file: {flows_path}")
-                  sys.exit(1)
+          for entry in har.get("log", {}).get("entries", []):
+              url = entry.get("request", {}).get("url", "")
+              host = (urlparse(url).hostname or "").lower()
+              if not host:
+                  continue
 
-              from mitmproxy.io import FlowReader
+              hosts.add(host)
+              status = int(entry.get("response", {}).get("status", 0) or 0)
+              if status > 0 and host_is_allowed(host):
+                  allowed_success.add(host)
+              if status > 0 and host_is_blocked(host):
+                  blocked_success.append((host, status))
 
-              with open(flows_path, "rb") as f:
-                  for flow in FlowReader(f).stream():
-                      req = getattr(flow, "request", None)
-                      if req is not None and getattr(req, "host", None):
-                      host = req.host.lower()
-                      hosts.add(host)
-
-                      resp = getattr(flow, "response", None)
-                      status = int(getattr(resp, "status_code", 0) or 0)
-                      if status > 0 and host_is_allowed(host):
-                        allowed_success.add(host)
-                      if status > 0 and host_is_blocked(host):
-                        blocked_success.append((host, status))
-          elif proxy_tool == "fluxzy":
-              har_path = os.path.join(capture_dir, "fluxzy-capture.har")
-              if not os.path.exists(har_path):
-                  print(f"::error::Missing Fluxzy HAR file: {har_path}")
-                  sys.exit(1)
-
-              with open(har_path, "r", encoding="utf-8") as f:
-                  har = json.load(f)
-              for entry in har.get("log", {}).get("entries", []):
-                  url = entry.get("request", {}).get("url", "")
-                  host = (urlparse(url).hostname or "").lower()
-                  if host:
-                      hosts.add(host)
-                    status = int(entry.get("response", {}).get("status", 0) or 0)
-                    if status > 0 and host_is_allowed(host):
-                      allowed_success.add(host)
-                    if status > 0 and host_is_blocked(host):
-                      blocked_success.append((host, status))
-          else:
-              print(f"::error::Unsupported proxy tool in test: {proxy_tool}")
-              sys.exit(1)
-
-            allowed_seen = sorted(h for h in hosts if host_is_allowed(h))
-            blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
+          blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
 
           print(f"Captured hosts ({proxy_tool}): {sorted(hosts)}")
-            if blocked_seen:
+          if blocked_seen:
               print(f"Blocked hosts observed as attempts ({proxy_tool}): {blocked_seen}")
 
-            if not allowed_success:
+          if not allowed_success:
               print("::error::No successful allowed-domain traffic was captured in proxy output")
               sys.exit(1)
 
-            if blocked_success:
+          if blocked_success:
               print(f"::error::Blocked domain(s) unexpectedly received responses: {blocked_success}")
               sys.exit(1)
           PY
@@ -360,11 +337,7 @@ jobs:
 
           [ -f "$CAPTURE_DIR/raw-capture.pcap" ] && echo "PCAP: OK" || echo "::error::PCAP missing"
           [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::error::SSL keys missing"
-          if [ "$PROXY_TOOL" = "fluxzy" ]; then
-            [ -f "$CAPTURE_DIR/fluxzy-capture.har" ] && echo "Fluxzy HAR: OK" || echo "::error::Fluxzy HAR missing"
-          else
-            [ -f "$CAPTURE_DIR/mitmproxy-flows" ] && echo "Flows: OK" || echo "::error::Flows missing"
-          fi
+          [ -f "$CAPTURE_DIR/capture.har" ] && echo "HAR: OK" || echo "::error::HAR missing"
 
   test-windows:
     name: "Integration test (Windows, ${{ matrix.proxy-tool }})"
@@ -428,18 +401,10 @@ jobs:
           Write-Host "Capture dir: $captureDir"
           Get-ChildItem $captureDir -Recurse -ErrorAction SilentlyContinue | Format-Table Name, Length
 
-          if ($env:PROXY_TOOL -eq "fluxzy") {
-            if (Test-Path (Join-Path $captureDir "fluxzy-capture.har")) {
-              Write-Host "Fluxzy HAR: OK"
-            } else {
-              Write-Host "::warning::Fluxzy HAR not found"
-            }
+          if (Test-Path (Join-Path $captureDir "capture.har")) {
+            Write-Host "HAR: OK"
           } else {
-            if (Test-Path (Join-Path $captureDir "mitmproxy-flows")) {
-              Write-Host "mitmproxy flows: OK"
-            } else {
-              Write-Host "::warning::mitmproxy flows not found"
-            }
+            Write-Host "::warning::HAR not found"
           }
 
           if (Test-Path (Join-Path $captureDir "sslkeys.log")) {
@@ -505,8 +470,4 @@ jobs:
           ls -lah "$CAPTURE_DIR/" || true
 
           [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::warning::SSL keys missing"
-          if [ "$PROXY_TOOL" = "fluxzy" ]; then
-            [ -f "$CAPTURE_DIR/fluxzy-capture.har" ] && echo "Fluxzy HAR: OK" || echo "::warning::Fluxzy HAR missing"
-          else
-            [ -f "$CAPTURE_DIR/mitmproxy-flows" ] && echo "mitmproxy flows: OK" || echo "::warning::mitmproxy flows missing"
-          fi
+          [ -f "$CAPTURE_DIR/capture.har" ] && echo "HAR: OK" || echo "::warning::HAR missing"

@@ -390,7 +390,7 @@ runs:
           start
           -l "127.0.0.1:$PROXY_PORT"
           -k
-          -o "$CAPTURE_DIR/fluxzy-capture.har"
+          -o "$CAPTURE_DIR/capture.har"
         )
 
         if [ -n "$PCAP_FLUXZY_RULE_FILE" ] && [ -f "$PCAP_FLUXZY_RULE_FILE" ]; then
@@ -496,7 +496,7 @@ runs:
           --listen-port "$PROXY_PORT"
           --set "confdir=$MITMPROXY_HOME"
           --set "ssl_insecure=true"
-          --save-stream-file "$CAPTURE_DIR/mitmproxy-flows"
+          --set "hardump=$CAPTURE_DIR/capture.har"
           --quiet
         )
 

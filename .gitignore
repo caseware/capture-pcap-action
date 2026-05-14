@@ -3,7 +3,7 @@
 *.etl
 *.tar.gz
 sslkeys.log
-mitmproxy-flows
+capture.har
 bundle/
 
 # Python

@@ -129,7 +129,7 @@ Filtering is applied inline when `proxy-tool: mitmproxy` via the addon (`scripts
 When `raw-capture: true` is set, the raw PCAP (tcpdump/netsh) captures all
 packets regardless of the filter. This is useful for debugging network issues
 that the proxy filter might mask. Use the `sslkeys.log` + PCAP in Wireshark
-for full visibility, and the mitmproxy flows for the filtered view.
+for full visibility, and `capture.har` for the filtered proxy view.
 
 By default (`raw-capture: false`), only the selected proxy runs — this is lighter,
 faster, and avoids the `sudo`/admin requirements of tcpdump/netsh.
