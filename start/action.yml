@@ -166,8 +166,8 @@ runs:
       uses: actions/cache@v4
       id: mitmproxy-cache
       with:
-        path: ${{ runner.temp }}/pcap-tools/mitmproxy/${{ inputs.mitmproxy-version }}/${{ runner.os }}
-        key: mitmproxy-${{ runner.os }}-${{ inputs.mitmproxy-version }}
+        path: ${{ runner.temp }}/pcap-tools/mitmproxy/${{ inputs.mitmproxy-version }}/${{ runner.os }}/${{ runner.arch }}
+        key: mitmproxy-${{ runner.os }}-${{ runner.arch }}-${{ inputs.mitmproxy-version }}
 
     - name: Install mitmproxy
       if: inputs.proxy-tool == 'mitmproxy'
@@ -190,7 +190,7 @@ runs:
           exit 1
         fi
 
-        MITM_VENV="${RUNNER_TEMP:-/tmp}/pcap-tools/mitmproxy/${MITMPROXY_VERSION}/${RUNNER_OS}"
+        MITM_VENV="${RUNNER_TEMP:-/tmp}/pcap-tools/mitmproxy/${MITMPROXY_VERSION}/${RUNNER_OS}/${RUNNER_ARCH}"
 
         if [ "${{ steps.mitmproxy-cache.outputs.cache-hit }}" != "true" ]; then
           "${PYTHON_CMD[@]}" -m venv "$MITM_VENV"
