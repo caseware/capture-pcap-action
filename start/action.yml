@@ -100,8 +100,10 @@ runs:
 
         MITMPROXY_HOME="$CAPTURE_DIR/.mitmproxy"
         FLUXZY_HOME="$CAPTURE_DIR/.fluxzy"
+        FLUXZY_DUMP_DIR="$CAPTURE_DIR/fluxzy-dump"
         mkdir -p "$MITMPROXY_HOME"
         mkdir -p "$FLUXZY_HOME"
+        mkdir -p "$FLUXZY_DUMP_DIR"
 
         PROXY_TOOL="$INPUT_PROXY_TOOL"
         if [ "$PROXY_TOOL" = "fluxzy" ]; then
@@ -113,6 +115,7 @@ runs:
         echo "capture-dir=$CAPTURE_DIR"      >> "$GITHUB_OUTPUT"
         echo "mitmproxy-home=$MITMPROXY_HOME" >> "$GITHUB_OUTPUT"
         echo "fluxzy-home=$FLUXZY_HOME" >> "$GITHUB_OUTPUT"
+        echo "fluxzy-dump-dir=$FLUXZY_DUMP_DIR" >> "$GITHUB_OUTPUT"
         echo "ca-cert=$CA_CERT" >> "$GITHUB_OUTPUT"
         echo "proxy-url=http://127.0.0.1:$INPUT_PROXY_PORT" >> "$GITHUB_OUTPUT"
 
@@ -120,6 +123,7 @@ runs:
         echo "PCAP_CAPTURE_DIR=$CAPTURE_DIR"        >> "$GITHUB_ENV"
         echo "PCAP_MITMPROXY_HOME=$MITMPROXY_HOME"  >> "$GITHUB_ENV"
         echo "PCAP_FLUXZY_HOME=$FLUXZY_HOME" >> "$GITHUB_ENV"
+        echo "PCAP_FLUXZY_DUMP_DIR=$FLUXZY_DUMP_DIR" >> "$GITHUB_ENV"
         echo "PCAP_PROXY_TOOL=$PROXY_TOOL" >> "$GITHUB_ENV"
         echo "PCAP_CA_CERT=$CA_CERT" >> "$GITHUB_ENV"
         echo "PCAP_PROXY_PORT=$INPUT_PROXY_PORT" >> "$GITHUB_ENV"
@@ -390,7 +394,7 @@ runs:
           start
           -l "127.0.0.1:$PROXY_PORT"
           -k
-          -o "$CAPTURE_DIR/capture.har"
+          -d "$PCAP_FLUXZY_DUMP_DIR"
         )
 
         if [ -n "$PCAP_FLUXZY_RULE_FILE" ] && [ -f "$PCAP_FLUXZY_RULE_FILE" ]; then

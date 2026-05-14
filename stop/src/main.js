@@ -1,4 +1,4 @@
-const { exec: execCb, spawn } = require("node:child_process");
+const { exec: execCb, execFile: execFileCb, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -6,6 +6,7 @@ const path = require("node:path");
 const os = require("node:os");
 
 const exec = promisify(execCb);
+const execFile = promisify(execFileCb);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function appendOutput(key, value) {
@@ -49,6 +50,11 @@ async function isProcessAlive(pid) {
   } catch {
     return false;
   }
+}
+
+async function runFile(command, args, opts = {}) {
+  console.log(`> ${command} ${args.join(" ")}`);
+  await execFile(command, args, opts);
 }
 
 async function killProcess(pid, { sudo = false } = {}) {
@@ -163,7 +169,16 @@ async function main() {
   const pcapFile = path.join(captureDir, "raw-capture.pcap");
   const sslKeylog = path.join(captureDir, "sslkeys.log");
   const caCert = process.env.PCAP_CA_CERT || path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
+  const fluxzyDumpDir = process.env.PCAP_FLUXZY_DUMP_DIR || path.join(captureDir, "fluxzy-dump");
   const harFile = path.join(captureDir, "capture.har");
+
+  if (proxyTool === "fluxzy") {
+    await runFile(os.platform() === "win32" ? "fluxzy.cmd" : "fluxzy", [
+      "pack",
+      fluxzyDumpDir,
+      harFile,
+    ]);
+  }
 
   const hasRawCapture = await exists(pcapFile);
 
