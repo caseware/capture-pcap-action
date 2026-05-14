@@ -134,31 +134,27 @@ runs:
         echo "PCAP_FILTER_MAX_BODY_SIZE=$INPUT_FILTER_MAX_BODY_SIZE" >> "$GITHUB_ENV"
 
     # ── Install proxy tool ──────────────────────────────────────────────
-    - name: Cache Fluxzy install
+    - name: Cache Fluxzy npm cache
       if: inputs.proxy-tool == 'fluxzy'
       uses: actions/cache@v4
       id: fluxzy-cache
       with:
-        path: ${{ runner.temp }}/pcap-tools/fluxzy/${{ inputs.fluxzy-version }}/${{ runner.os }}
-        key: fluxzy-${{ runner.os }}-${{ inputs.fluxzy-version }}
+        path: ${{ runner.temp }}/pcap-tools/npm-cache
+        key: fluxzy-npm-${{ runner.os }}-${{ runner.arch }}-${{ inputs.fluxzy-version }}
 
     - name: Install Fluxzy
       if: inputs.proxy-tool == 'fluxzy'
       shell: bash
       env:
         FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
+        NPM_CONFIG_CACHE: ${{ runner.temp }}/pcap-tools/npm-cache
       run: |
         echo "::group::Installing Fluxzy CLI"
-        FLUXZY_INSTALL_DIR="${RUNNER_TEMP:-/tmp}/pcap-tools/fluxzy/${FLUXZY_VERSION}/${RUNNER_OS}"
-        echo "$FLUXZY_INSTALL_DIR/node_modules/.bin" >> "$GITHUB_PATH"
-        export PATH="$FLUXZY_INSTALL_DIR/node_modules/.bin:$PATH"
-
         if [ "${{ steps.fluxzy-cache.outputs.cache-hit }}" != "true" ]; then
-          mkdir -p "$FLUXZY_INSTALL_DIR"
           if [ "$FLUXZY_VERSION" = "latest" ]; then
-            npm install --prefix "$FLUXZY_INSTALL_DIR" @fluxzy/cli
+            npm install -g @fluxzy/cli
           else
-            npm install --prefix "$FLUXZY_INSTALL_DIR" "@fluxzy/cli@$FLUXZY_VERSION"
+            npm install -g "@fluxzy/cli@$FLUXZY_VERSION"
           fi
         fi
 
