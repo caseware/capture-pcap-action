@@ -42,6 +42,105 @@ async function exists(p) {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
+function csv(value) {
+  return (value || "")
+    .split(",")
+    .map((v) => v.trim())
+    .filter(Boolean);
+}
+
+function globToRegExp(pattern) {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*")
+    .replace(/\?/g, ".");
+  return new RegExp(`^${escaped}$`, "i");
+}
+
+function matchGlobList(value, patterns) {
+  if (!patterns.length) {
+    return false;
+  }
+  return patterns.some((pattern) => globToRegExp(pattern).test(value));
+}
+
+function getHeader(headers, name) {
+  if (!Array.isArray(headers)) {
+    return "";
+  }
+  const lowerName = name.toLowerCase();
+  const item = headers.find((h) => (h.name || "").toLowerCase() === lowerName);
+  return (item?.value || "").trim();
+}
+
+async function filterHarInPlace(harPath) {
+  if (!(await exists(harPath))) {
+    return;
+  }
+
+  const allowDomains = csv(process.env.PCAP_FILTER_DOMAINS);
+  const denyDomains = csv(process.env.PCAP_FILTER_EXCLUDE_DOMAINS);
+  const referers = csv(process.env.PCAP_FILTER_REFERERS);
+  const contentTypes = csv(process.env.PCAP_FILTER_CONTENT_TYPES).map((v) =>
+    v.toLowerCase()
+  );
+  const maxBodySize = Number.parseInt(process.env.PCAP_FILTER_MAX_BODY_SIZE || "0", 10) || 0;
+
+  if (
+    !allowDomains.length &&
+    !denyDomains.length &&
+    !referers.length &&
+    !contentTypes.length &&
+    maxBodySize <= 0
+  ) {
+    return;
+  }
+
+  const raw = await fs.readFile(harPath, "utf8");
+  const har = JSON.parse(raw);
+  const entries = Array.isArray(har?.log?.entries) ? har.log.entries : [];
+
+  const filtered = entries.filter((entry) => {
+    const request = entry?.request || {};
+    const response = entry?.response || {};
+
+    let host = "";
+    try {
+      host = new URL(request.url || "").hostname || "";
+    } catch {
+      host = "";
+    }
+
+    if (allowDomains.length && !matchGlobList(host, allowDomains)) {
+      return false;
+    }
+    if (denyDomains.length && matchGlobList(host, denyDomains)) {
+      return false;
+    }
+
+    const referer = getHeader(request.headers, "referer");
+    if (referers.length && !matchGlobList(referer, referers)) {
+      return false;
+    }
+
+    const contentType = (response?.content?.mimeType || "").toLowerCase();
+    if (contentTypes.length && !contentTypes.some((ct) => contentType.startsWith(ct))) {
+      return false;
+    }
+
+    const bodySize = Number(response?.bodySize ?? response?.content?.size ?? 0);
+    if (maxBodySize > 0 && bodySize > maxBodySize) {
+      return false;
+    }
+
+    return true;
+  });
+
+  har.log.entries = filtered;
+  await fs.writeFile(harPath, JSON.stringify(har));
+  console.log(`Filtered Fluxzy HAR entries: ${entries.length} -> ${filtered.length}`);
+}
+
 async function killProcess(pid, { sudo = false } = {}) {
   const prefix = sudo ? "sudo " : "";
   await run(`${prefix}kill ${pid} 2>/dev/null || true`, {
@@ -69,31 +168,40 @@ async function main() {
   }
 
   console.log(`Capture directory: ${captureDir}`);
+  const proxyTool = (process.env.PCAP_PROXY_TOOL || "mitmproxy").toLowerCase();
+  console.log(`Proxy tool: ${proxyTool}`);
 
-  // ── Stop mitmproxy ──────────────────────────────────────────────
-  const mitmdumpPidFile = path.join(captureDir, "mitmdump.pid");
-  if (await exists(mitmdumpPidFile)) {
-    const pid = (await fs.readFile(mitmdumpPidFile, "utf8")).trim();
-    console.log(`Stopping mitmdump (PID ${pid})...`);
+  // ── Stop proxy process ──────────────────────────────────────────
+  const pidFile =
+    proxyTool === "fluxzy"
+      ? path.join(captureDir, "fluxzy.pid")
+      : path.join(captureDir, "mitmdump.pid");
+  const logFile =
+    proxyTool === "fluxzy"
+      ? path.join(captureDir, "fluxzy-stdout.log")
+      : path.join(captureDir, "mitmdump-stdout.log");
+
+  if (await exists(pidFile)) {
+    const pid = (await fs.readFile(pidFile, "utf8")).trim();
+    console.log(`Stopping ${proxyTool} (PID ${pid})...`);
     if (os.platform() === "win32") {
       await run(`taskkill /PID ${pid} /F`, { ignoreError: true });
     } else {
       await killProcess(pid);
     }
-    await fs.unlink(mitmdumpPidFile);
-    console.log("mitmdump stopped");
+    await fs.unlink(pidFile);
+    console.log(`${proxyTool} stopped`);
 
-    const mitmdumpLog = path.join(captureDir, "mitmdump-stdout.log");
-    if (await exists(mitmdumpLog)) {
-      const log = (await fs.readFile(mitmdumpLog, "utf8")).trim();
+    if (await exists(logFile)) {
+      const log = (await fs.readFile(logFile, "utf8")).trim();
       if (log) {
-        console.log("::group::mitmdump log");
+        console.log(`::group::${proxyTool} log`);
         console.log(log);
         console.log("::endgroup::");
       }
     }
   } else {
-    console.log("::warning::mitmdump PID file not found");
+    console.log(`::warning::${proxyTool} PID file not found`);
   }
 
   // ── Stop tcpdump / netsh ────────────────────────────────────────
@@ -125,8 +233,13 @@ async function main() {
   // ── Finalize artifacts ──────────────────────────────────────────
   const pcapFile = path.join(captureDir, "raw-capture.pcap");
   const sslKeylog = path.join(captureDir, "sslkeys.log");
-  const caCert = path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
+  const caCert = process.env.PCAP_CA_CERT || path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
   const flowsFile = path.join(captureDir, "mitmproxy-flows");
+  const fluxzyHarFile = path.join(captureDir, "fluxzy-capture.har");
+
+  if (proxyTool === "fluxzy") {
+    await filterHarInPlace(fluxzyHarFile);
+  }
 
   const hasRawCapture = await exists(pcapFile);
 
@@ -155,9 +268,9 @@ async function main() {
   const bundleDir = path.join(captureDir, "bundle");
   await fs.mkdir(bundleDir, { recursive: true });
 
-  // Always include mitmproxy flows; only include raw PCAP, SSL keys,
+  // Always include proxy capture output; only include raw PCAP, SSL keys,
   // and CA cert when raw capture was active (tcpdump/netsh produced a file).
-  const bundleFiles = [flowsFile];
+  const bundleFiles = proxyTool === "fluxzy" ? [fluxzyHarFile] : [flowsFile];
   if (hasRawCapture) {
     bundleFiles.push(pcapFile, sslKeylog, caCert);
   }

@@ -1,10 +1,14 @@
 name: 'Start PCAP Capture'
-description: 'Starts mitmproxy + packet capture for TLS-decryptable PCAP recording. Place this step before your e2e tests.'
+description: 'Starts Fluxzy or mitmproxy + packet capture for TLS-decryptable recording. Place this step before your e2e tests.'
 author: 'CaseWare'
 
 inputs:
+  proxy-tool:
+    description: 'Proxy tool to run. Supported values: fluxzy, mitmproxy.'
+    required: false
+    default: 'fluxzy'
   proxy-port:
-    description: 'Port for the mitmproxy forward proxy.'
+    description: 'Port for the forward proxy.'
     required: false
     default: '8080'
   capture-dir:
@@ -23,6 +27,10 @@ inputs:
     description: 'mitmproxy version to download (standalone binary from GitHub releases).'
     required: false
     default: '11.0.2'
+  fluxzy-version:
+    description: 'Fluxzy CLI version to install when proxy-tool=fluxzy (npm version or latest).'
+    required: false
+    default: 'latest'
   filter-domains:
     description: 'Comma-separated domain allowlist for mitmproxy (glob patterns OK, e.g. "*.caseware.com,*.google.com"). Only matching traffic is kept.'
     required: false
@@ -61,7 +69,7 @@ outputs:
     description: 'Directory containing capture artifacts.'
     value: ${{ steps.setup-dirs.outputs.capture-dir }}
   ca-cert:
-    description: 'Path to the mitmproxy root CA certificate (PEM).'
+    description: 'Path to the proxy root CA certificate (PEM/CRT).'
     value: ${{ steps.setup-dirs.outputs.ca-cert }}
   proxy-url:
     description: 'HTTP(S) proxy URL for clients.'
@@ -73,30 +81,87 @@ runs:
     - name: Setup directories
       id: setup-dirs
       shell: bash
+      env:
+        INPUT_CAPTURE_DIR: ${{ inputs.capture-dir }}
+        INPUT_PROXY_TOOL: ${{ inputs.proxy-tool }}
+        INPUT_PROXY_PORT: ${{ inputs.proxy-port }}
+        INPUT_FILTER_DOMAINS: ${{ inputs.filter-domains }}
+        INPUT_FILTER_EXCLUDE_DOMAINS: ${{ inputs.filter-exclude-domains }}
+        INPUT_FILTER_REFERERS: ${{ inputs.filter-referers }}
+        INPUT_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
+        INPUT_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
       run: |
-        if [ -n "${{ inputs.capture-dir }}" ]; then
-          CAPTURE_DIR="${{ inputs.capture-dir }}"
+        if [ -n "$INPUT_CAPTURE_DIR" ]; then
+          CAPTURE_DIR="$INPUT_CAPTURE_DIR"
         else
           CAPTURE_DIR="${RUNNER_TEMP:-/tmp}/pcap-capture"
         fi
         mkdir -p "$CAPTURE_DIR"
 
         MITMPROXY_HOME="$CAPTURE_DIR/.mitmproxy"
+        FLUXZY_HOME="$CAPTURE_DIR/.fluxzy"
         mkdir -p "$MITMPROXY_HOME"
+        mkdir -p "$FLUXZY_HOME"
+
+        PROXY_TOOL="$INPUT_PROXY_TOOL"
+        if [ "$PROXY_TOOL" = "fluxzy" ]; then
+          CA_CERT="$FLUXZY_HOME/fluxzy-ca.crt"
+        else
+          CA_CERT="$MITMPROXY_HOME/mitmproxy-ca-cert.pem"
+        fi
 
         echo "capture-dir=$CAPTURE_DIR"      >> "$GITHUB_OUTPUT"
         echo "mitmproxy-home=$MITMPROXY_HOME" >> "$GITHUB_OUTPUT"
-        echo "ca-cert=$MITMPROXY_HOME/mitmproxy-ca-cert.pem" >> "$GITHUB_OUTPUT"
-        echo "proxy-url=http://127.0.0.1:${{ inputs.proxy-port }}" >> "$GITHUB_OUTPUT"
+        echo "fluxzy-home=$FLUXZY_HOME" >> "$GITHUB_OUTPUT"
+        echo "ca-cert=$CA_CERT" >> "$GITHUB_OUTPUT"
+        echo "proxy-url=http://127.0.0.1:$INPUT_PROXY_PORT" >> "$GITHUB_OUTPUT"
 
         # Persist for the stop action
         echo "PCAP_CAPTURE_DIR=$CAPTURE_DIR"        >> "$GITHUB_ENV"
         echo "PCAP_MITMPROXY_HOME=$MITMPROXY_HOME"  >> "$GITHUB_ENV"
-        echo "PCAP_PROXY_PORT=${{ inputs.proxy-port }}" >> "$GITHUB_ENV"
+        echo "PCAP_FLUXZY_HOME=$FLUXZY_HOME" >> "$GITHUB_ENV"
+        echo "PCAP_PROXY_TOOL=$PROXY_TOOL" >> "$GITHUB_ENV"
+        echo "PCAP_CA_CERT=$CA_CERT" >> "$GITHUB_ENV"
+        echo "PCAP_PROXY_PORT=$INPUT_PROXY_PORT" >> "$GITHUB_ENV"
+        echo "PCAP_FILTER_DOMAINS=$INPUT_FILTER_DOMAINS" >> "$GITHUB_ENV"
+        echo "PCAP_FILTER_EXCLUDE_DOMAINS=$INPUT_FILTER_EXCLUDE_DOMAINS" >> "$GITHUB_ENV"
+        echo "PCAP_FILTER_REFERERS=$INPUT_FILTER_REFERERS" >> "$GITHUB_ENV"
+        echo "PCAP_FILTER_CONTENT_TYPES=$INPUT_FILTER_CONTENT_TYPES" >> "$GITHUB_ENV"
+        echo "PCAP_FILTER_MAX_BODY_SIZE=$INPUT_FILTER_MAX_BODY_SIZE" >> "$GITHUB_ENV"
 
-    # ── Install mitmproxy ──────────────────────────────────────────────
+    # ── Install proxy tool ──────────────────────────────────────────────
+    - name: Install Fluxzy (Linux)
+      if: runner.os == 'Linux' && inputs.proxy-tool == 'fluxzy'
+      shell: bash
+      env:
+        FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
+      run: |
+        echo "::group::Installing Fluxzy CLI"
+        if [ "$FLUXZY_VERSION" = "latest" ]; then
+          npm install -g @fluxzy/cli
+        else
+          npm install -g "@fluxzy/cli@$FLUXZY_VERSION"
+        fi
+        fluxzy --help >/dev/null
+        echo "::endgroup::"
+
+    - name: Install Fluxzy (Windows)
+      if: runner.os == 'Windows' && inputs.proxy-tool == 'fluxzy'
+      shell: pwsh
+      env:
+        FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
+      run: |
+        Write-Host "::group::Installing Fluxzy CLI"
+        if ($env:FLUXZY_VERSION -eq "latest") {
+          npm install -g @fluxzy/cli
+        } else {
+          npm install -g "@fluxzy/cli@$env:FLUXZY_VERSION"
+        }
+        fluxzy --help | Out-Null
+        Write-Host "::endgroup::"
+
     - name: Install mitmproxy (Linux)
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.proxy-tool == 'mitmproxy'
       shell: bash
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
@@ -124,7 +189,7 @@ runs:
         echo "::endgroup::"
 
     - name: Install mitmproxy (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.proxy-tool == 'mitmproxy'
       shell: pwsh
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
@@ -144,6 +209,7 @@ runs:
 
     # ── Generate CA and install it as trusted ──────────────────────────
     - name: Generate mitmproxy CA
+      if: inputs.proxy-tool == 'mitmproxy'
       shell: bash
       env:
         MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
@@ -169,13 +235,28 @@ runs:
         echo "CA certificate: $CONFDIR/mitmproxy-ca-cert.pem"
         openssl x509 -in "$CONFDIR/mitmproxy-ca-cert.pem" -noout -subject -dates
 
+    - name: Generate Fluxzy CA
+      if: inputs.proxy-tool == 'fluxzy'
+      shell: bash
+      env:
+        FLUXZY_HOME: ${{ steps.setup-dirs.outputs.fluxzy-home }}
+      run: |
+        CERT_PATH="$FLUXZY_HOME/fluxzy-ca.crt"
+        fluxzy cert export "$CERT_PATH"
+        if ! openssl x509 -in "$CERT_PATH" -noout -subject -dates >/dev/null 2>&1; then
+          if openssl x509 -inform DER -in "$CERT_PATH" -out "$CERT_PATH.pem" >/dev/null 2>&1; then
+            mv "$CERT_PATH.pem" "$CERT_PATH"
+          fi
+        fi
+        openssl x509 -in "$CERT_PATH" -noout -subject -dates
+
     - name: Trust CA (Linux)
       if: runner.os == 'Linux'
       shell: bash
       env:
-        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
+        PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
       run: |
-        sudo cp "$MITMPROXY_HOME/mitmproxy-ca-cert.pem" \
+        sudo cp "$PROXY_CA_CERT" \
           /usr/local/share/ca-certificates/mitmproxy-ca.crt
         sudo update-ca-certificates
 
@@ -183,9 +264,9 @@ runs:
       if: runner.os == 'Windows'
       shell: pwsh
       env:
-        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
+        PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
       run: |
-        $certPath = Join-Path $env:MITMPROXY_HOME "mitmproxy-ca-cert.pem"
+        $certPath = $env:PROXY_CA_CERT
         Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\Root
 
     # ── Start packet capture (opt-in) ──────────────────────────────────
@@ -213,9 +294,98 @@ runs:
         netsh trace start capture=yes tracefile=$traceFile maxSize=512 overwrite=yes
         Write-Host "::endgroup::"
 
-    # ── Start mitmproxy with inline filter addon ───────────────────────
+    # ── Start selected proxy tool ───────────────────────────────────────
+    - name: Start Fluxzy (Linux)
+      if: runner.os == 'Linux' && inputs.proxy-tool == 'fluxzy'
+      shell: bash
+      env:
+        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
+        PROXY_PORT: ${{ inputs.proxy-port }}
+      run: |
+        echo "::group::Starting fluxzy on port $PROXY_PORT"
+        export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
+
+        fluxzy start \
+          -l "127.0.0.1:$PROXY_PORT" \
+          -k \
+          -o "$CAPTURE_DIR/fluxzy-capture.har" \
+          > "$CAPTURE_DIR/fluxzy-stdout.log" 2>&1 &
+        FLUXZY_PID=$!
+        echo "$FLUXZY_PID" > "$CAPTURE_DIR/fluxzy.pid"
+        echo "fluxzy PID: $FLUXZY_PID"
+
+        READY=false
+        for i in $(seq 1 30); do
+          if ! kill -0 "$FLUXZY_PID" 2>/dev/null; then
+            echo "::warning::fluxzy (PID $FLUXZY_PID) exited early"
+            cat "$CAPTURE_DIR/fluxzy-stdout.log" 2>/dev/null || true
+            break
+          fi
+          if ss -tlnp 2>/dev/null | grep -q ":$PROXY_PORT "; then
+            echo "fluxzy is ready (iteration $i)"
+            READY=true
+            break
+          fi
+          sleep 1
+        done
+
+        if [ "$READY" = "true" ]; then
+          echo "PCAP_PROXY_READY=true" >> "$GITHUB_ENV"
+        else
+          echo "::warning::fluxzy readiness check timed out"
+          cat "$CAPTURE_DIR/fluxzy-stdout.log" 2>/dev/null || true
+          echo "PCAP_PROXY_READY=false" >> "$GITHUB_ENV"
+        fi
+        echo "::endgroup::"
+
+    - name: Start Fluxzy (Windows)
+      if: runner.os == 'Windows' && inputs.proxy-tool == 'fluxzy'
+      shell: pwsh
+      env:
+        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
+        PROXY_PORT: ${{ inputs.proxy-port }}
+      run: |
+        Write-Host "::group::Starting fluxzy on port $env:PROXY_PORT"
+        $sslKeyLog = Join-Path $env:CAPTURE_DIR "sslkeys.log"
+        $env:SSLKEYLOGFILE = $sslKeyLog
+
+        $allArgs = @(
+          "start",
+          "-l", "127.0.0.1:$env:PROXY_PORT",
+          "-k",
+          "-o", (Join-Path $env:CAPTURE_DIR "fluxzy-capture.har")
+        )
+
+        $proc = Start-Process -PassThru -NoNewWindow -FilePath "fluxzy" `
+          -ArgumentList $allArgs
+        $proc.Id | Out-File -FilePath (Join-Path $env:CAPTURE_DIR "fluxzy.pid") -NoNewline
+        Write-Host "fluxzy PID: $($proc.Id)"
+
+        $ready = $false
+        for ($i = 1; $i -le 30; $i++) {
+          if ($proc.HasExited) {
+            Write-Host "::warning::fluxzy exited early"
+            break
+          }
+          $listener = Get-NetTCPConnection -LocalPort $env:PROXY_PORT `
+            -State Listen -ErrorAction SilentlyContinue
+          if ($listener) {
+            Write-Host "fluxzy is ready (iteration $i)"
+            $ready = $true
+            break
+          }
+          Start-Sleep -Seconds 1
+        }
+        if ($ready) {
+          echo "PCAP_PROXY_READY=true" >> $env:GITHUB_ENV
+        } else {
+          Write-Host "::warning::fluxzy readiness check timed out"
+          echo "PCAP_PROXY_READY=false" >> $env:GITHUB_ENV
+        }
+        Write-Host "::endgroup::"
+
     - name: Start mitmproxy (Linux)
-      if: runner.os == 'Linux'
+      if: runner.os == 'Linux' && inputs.proxy-tool == 'mitmproxy'
       shell: bash
       env:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
@@ -294,7 +464,7 @@ runs:
         echo "::endgroup::"
 
     - name: Start mitmproxy (Windows)
-      if: runner.os == 'Windows'
+      if: runner.os == 'Windows' && inputs.proxy-tool == 'mitmproxy'
       shell: pwsh
       env:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
@@ -368,16 +538,16 @@ runs:
       if: runner.os == 'Linux' && env.PCAP_PROXY_READY == 'true'
       shell: bash
       env:
-        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
+        PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
       run: |
         if command -v keytool >/dev/null 2>&1 && [ -n "$JAVA_HOME" ]; then
           CACERTS="$JAVA_HOME/lib/security/cacerts"
           if [ -f "$CACERTS" ]; then
-            echo "Adding mitmproxy CA to Java truststore: $CACERTS"
+            echo "Adding proxy CA to Java truststore: $CACERTS"
             sudo keytool -importcert -noprompt \
               -keystore "$CACERTS" -storepass changeit \
               -alias mitmproxy-ca \
-              -file "$MITMPROXY_HOME/mitmproxy-ca-cert.pem" 2>/dev/null || true
+              -file "$PROXY_CA_CERT" 2>/dev/null || true
           fi
         fi
 
@@ -392,6 +562,7 @@ runs:
         PROXY_PORT: ${{ inputs.proxy-port }}
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
         PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
+        PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
       run: |
         PROXY_URL="http://127.0.0.1:$PROXY_PORT"
 
@@ -416,6 +587,6 @@ runs:
           echo "NO_PROXY=$NO_PROXY_LIST"
           echo "no_proxy=$NO_PROXY_LIST"
           echo "SSLKEYLOGFILE=$CAPTURE_DIR/sslkeys.log"
-          echo "NODE_EXTRA_CA_CERTS=$CAPTURE_DIR/.mitmproxy/mitmproxy-ca-cert.pem"
+          echo "NODE_EXTRA_CA_CERTS=$PROXY_CA_CERT"
         } >> "$GITHUB_ENV"
         echo "Proxy configured at $PROXY_URL (bypass: $NO_PROXY_LIST)"
