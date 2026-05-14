@@ -8,7 +8,7 @@ Capture e2e and regression test traffic as a **TLS-decryptable capture bundle** 
 
 2. **`stop/`** — Stops the proxy and packet capture, bundles the PCAP + TLS session keys (`SSLKEYLOGFILE`) + CA cert into a `.tar.gz`. The **S3 upload runs as a post step** so it executes even if subsequent steps fail.
 
-When `proxy-tool: mitmproxy`, filtering happens **inline** in the mitmproxy addon. When `proxy-tool: fluxzy`, capture is written as HAR and equivalent filtering is applied before bundling so downstream analysis sees the same filtered surface.
+When `proxy-tool: mitmproxy`, filtering happens **inline** in the mitmproxy addon.
 
 The resulting bundle can be opened in [Wireshark](https://www.wireshark.org/) with full TLS decryption using the included `sslkeys.log` file.
 
@@ -124,16 +124,7 @@ Only capture traffic to your own services:
 
 ## Inline filtering
 
-Filtering is applied as early as the selected proxy supports:
-
-- `mitmproxy`: inside the addon (`scripts/filter-addon.py`) at request/response time
-- `fluxzy`: before bundling the generated HAR so downstream analysis receives the same filtered capture set
-
-This means:
-
-- The flow file only contains traffic that passes the filter
-- No post-processing ETL step is needed
-- The resulting bundle is smaller from the start
+Filtering is applied inline when `proxy-tool: mitmproxy` via the addon (`scripts/filter-addon.py`) at request/response time.
 
 When `raw-capture: true` is set, the raw PCAP (tcpdump/netsh) captures all
 packets regardless of the filter. This is useful for debugging network issues
@@ -153,14 +144,14 @@ faster, and avoids the `sudo`/admin requirements of tcpdump/netsh.
 
 ## Platform support
 
-| Feature | Linux | Windows |
-|---------|-------|---------|
-| Fluxzy TLS interception | npm install | npm install |
-| mitmproxy TLS interception | standalone/pip install | standalone install |
-| Filtering | mitmproxy addon / Fluxzy pre-bundle HAR filter | mitmproxy addon / Fluxzy pre-bundle HAR filter |
-| Raw packet capture | tcpdump | netsh trace + etl2pcapng |
-| CA trust | update-ca-certificates | Import-Certificate |
-| S3 upload (post step) | aws cli | aws cli |
+| Feature | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| Fluxzy TLS interception | npm install | npm install | npm install |
+| mitmproxy TLS interception | pip install | pip install | pip install |
+| Filtering | mitmproxy addon (inline) | mitmproxy addon (inline) | mitmproxy addon (inline) |
+| Raw packet capture | tcpdump | tcpdump | netsh trace + etl2pcapng |
+| CA trust | update-ca-certificates | security add-trusted-cert | Import-Certificate |
+| S3 upload (post step) | aws cli | aws cli | aws cli |
 
 ## Integration with existing workflows
 

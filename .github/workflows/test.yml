@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Validate VERSION bump
@@ -68,7 +68,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start MinIO
         run: |
@@ -136,6 +136,12 @@ jobs:
             -o /dev/null -w "example.com: HTTP %{http_code}\n" \
             https://example.com
 
+          # This request should be blocked by filter-domains.
+          curl -sS --max-time 15 \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
+            https://github.com || true
+
           echo "=== Test requests complete ==="
 
       # ── Stop capture ───────────────────────────────────────────────
@@ -148,6 +154,74 @@ jobs:
           s3-prefix: integration-test/${{ github.run_id }}
           s3-endpoint: http://localhost:9000
           artifact-name: test-capture
+
+      - name: Assert domain filtering in proxy output
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
+          CAPTURE_DIR: ${{ env.PCAP_CAPTURE_DIR }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from urllib.parse import urlparse
+
+          proxy_tool = os.environ["PROXY_TOOL"]
+          capture_dir = os.environ["CAPTURE_DIR"]
+          allowed_suffixes = ("google.com", "example.com")
+          blocked_suffix = "github.com"
+
+          def host_is_allowed(host: str) -> bool:
+              return any(host == s or host.endswith(f".{s}") for s in allowed_suffixes)
+
+          def host_is_blocked(host: str) -> bool:
+              return host == blocked_suffix or host.endswith(f".{blocked_suffix}")
+
+          hosts = set()
+
+          if proxy_tool == "mitmproxy":
+              flows_path = os.path.join(capture_dir, "mitmproxy-flows")
+              if not os.path.exists(flows_path):
+                  print(f"::error::Missing mitmproxy flows file: {flows_path}")
+                  sys.exit(1)
+
+              from mitmproxy.io import FlowReader
+
+              with open(flows_path, "rb") as f:
+                  for flow in FlowReader(f).stream():
+                      req = getattr(flow, "request", None)
+                      if req is not None and getattr(req, "host", None):
+                          hosts.add(req.host.lower())
+          elif proxy_tool == "fluxzy":
+              har_path = os.path.join(capture_dir, "fluxzy-capture.har")
+              if not os.path.exists(har_path):
+                  print(f"::error::Missing Fluxzy HAR file: {har_path}")
+                  sys.exit(1)
+
+              with open(har_path, "r", encoding="utf-8") as f:
+                  har = json.load(f)
+              for entry in har.get("log", {}).get("entries", []):
+                  url = entry.get("request", {}).get("url", "")
+                  host = (urlparse(url).hostname or "").lower()
+                  if host:
+                      hosts.add(host)
+          else:
+              print(f"::error::Unsupported proxy tool in test: {proxy_tool}")
+              sys.exit(1)
+
+          allowed_seen = sorted(h for h in hosts if host_is_allowed(h))
+          blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
+
+          print(f"Captured hosts ({proxy_tool}): {sorted(hosts)}")
+
+          if not allowed_seen:
+              print("::error::No allowed domains were captured in proxy output")
+              sys.exit(1)
+
+          if blocked_seen:
+              print(f"::error::Blocked domain(s) unexpectedly captured: {blocked_seen}")
+              sys.exit(1)
+          PY
 
       # ── Verify PCAP ────────────────────────────────────────────────
       - name: Verify PCAP file exists and contains traffic
@@ -232,7 +306,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start PCAP capture (no filter)
         uses: ./start
@@ -285,7 +359,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start PCAP capture
         uses: ./start
@@ -373,7 +447,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start PCAP capture
         uses: ./start

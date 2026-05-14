@@ -24,7 +24,7 @@ inputs:
     default: ''
     deprecationMessage: 'Not yet implemented — reserved for a future release.'
   mitmproxy-version:
-    description: 'mitmproxy version to download (standalone binary from GitHub releases).'
+    description: 'mitmproxy version to install via pip.'
     required: false
     default: '11.0.2'
   fluxzy-version:
@@ -150,24 +150,38 @@ runs:
       shell: bash
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
+        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
       run: |
         set -euo pipefail
         echo "::group::Installing mitmproxy $MITMPROXY_VERSION on $RUNNER_OS"
 
-        if command -v python3 >/dev/null 2>&1; then
-          PYTHON_BIN=python3
+        if [ "$RUNNER_OS" = "Windows" ] && command -v py >/dev/null 2>&1; then
+          PYTHON_CMD=(py -3)
+        elif command -v python3 >/dev/null 2>&1; then
+          PYTHON_CMD=(python3)
         elif command -v python >/dev/null 2>&1; then
-          PYTHON_BIN=python
+          PYTHON_CMD=(python)
         else
           echo "::error::python is required to install mitmproxy"
           exit 1
         fi
 
-        "$PYTHON_BIN" -m pip install --user "mitmproxy==$MITMPROXY_VERSION"
+        MITM_VENV="$CAPTURE_DIR/.mitmproxy-venv"
+        "${PYTHON_CMD[@]}" -m venv "$MITM_VENV"
 
-        SCRIPTS_DIR="$($PYTHON_BIN -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
-        echo "$SCRIPTS_DIR" >> "$GITHUB_PATH"
-        export PATH="$SCRIPTS_DIR:$PATH"
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          VENV_BIN="$MITM_VENV/Scripts"
+          VENV_PY="$VENV_BIN/python.exe"
+        else
+          VENV_BIN="$MITM_VENV/bin"
+          VENV_PY="$VENV_BIN/python"
+        fi
+
+        "$VENV_PY" -m pip install --upgrade pip
+        "$VENV_PY" -m pip install "mitmproxy==$MITMPROXY_VERSION"
+
+        echo "$VENV_BIN" >> "$GITHUB_PATH"
+        export PATH="$VENV_BIN:$PATH"
 
         mitmdump --version
         echo "::endgroup::"
@@ -239,6 +253,86 @@ runs:
         $certPath = $env:PROXY_CA_CERT
         Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\Root
 
+    - name: Prepare Fluxzy rules
+      if: inputs.proxy-tool == 'fluxzy'
+      shell: bash
+      env:
+        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
+        INPUT_FILTER_DOMAINS: ${{ inputs.filter-domains }}
+        INPUT_FILTER_EXCLUDE_DOMAINS: ${{ inputs.filter-exclude-domains }}
+      run: |
+        set -euo pipefail
+        RULE_FILE="$CAPTURE_DIR/fluxzy-rules.yml"
+
+        if [ "$RUNNER_OS" = "Windows" ] && command -v py >/dev/null 2>&1; then
+          PYTHON_CMD=(py -3)
+        elif command -v python3 >/dev/null 2>&1; then
+          PYTHON_CMD=(python3)
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON_CMD=(python)
+        else
+          echo "::error::python is required to generate Fluxzy rule file"
+          exit 1
+        fi
+
+        "${PYTHON_CMD[@]}" - "$RULE_FILE" "$INPUT_FILTER_DOMAINS" "$INPUT_FILTER_EXCLUDE_DOMAINS" <<'PY'
+        import re
+        import sys
+
+        rule_file, allow_csv, deny_csv = sys.argv[1:4]
+
+        def parse_csv(value: str):
+          return [x.strip() for x in value.split(",") if x.strip()]
+
+        def glob_to_regex(pattern: str) -> str:
+          escaped = re.escape(pattern)
+          escaped = escaped.replace(r"\*", ".*").replace(r"\?", ".")
+          return f"^{escaped}$"
+
+        allow = parse_csv(allow_csv)
+        deny = parse_csv(deny_csv)
+
+        if not allow and not deny:
+          sys.exit(0)
+
+        lines = ["rules:"]
+
+        if deny:
+          lines.append("  - filter:")
+          lines.append("      typeKind: FilterCollection")
+          lines.append("      operation: Or")
+          lines.append("      children:")
+          for d in deny:
+            lines.append("        - typeKind: HostFilter")
+            lines.append(f"          pattern: {glob_to_regex(d)}")
+            lines.append("          operation: regex")
+          lines.append("    actions:")
+          lines.append("      - typeKind: AbortAction")
+
+        if allow:
+          lines.append("  - filter:")
+          lines.append("      typeKind: FilterCollection")
+          lines.append("      operation: Or")
+          lines.append("      inverted: true")
+          lines.append("      children:")
+          for a in allow:
+            lines.append("        - typeKind: HostFilter")
+            lines.append(f"          pattern: {glob_to_regex(a)}")
+            lines.append("          operation: regex")
+          lines.append("    actions:")
+          lines.append("      - typeKind: AbortAction")
+
+        with open(rule_file, "w", encoding="utf-8") as f:
+          f.write("\n".join(lines) + "\n")
+        PY
+
+        if [ -f "$RULE_FILE" ]; then
+          echo "PCAP_FLUXZY_RULE_FILE=$RULE_FILE" >> "$GITHUB_ENV"
+          echo "Fluxzy rules enabled: $RULE_FILE"
+        else
+          echo "PCAP_FLUXZY_RULE_FILE=" >> "$GITHUB_ENV"
+        fi
+
     # ── Start packet capture (opt-in) ──────────────────────────────────
     - name: Start tcpdump (Unix)
       if: runner.os != 'Windows' && inputs.raw-capture == 'true'
@@ -280,25 +374,44 @@ runs:
       env:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
         PROXY_PORT: ${{ inputs.proxy-port }}
+        PCAP_FLUXZY_RULE_FILE: ${{ env.PCAP_FLUXZY_RULE_FILE }}
       run: |
         set -euo pipefail
         echo "::group::Starting fluxzy on port $PROXY_PORT"
         export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
 
         if [ "$RUNNER_OS" = "Windows" ]; then
-          FLUXZY_BIN="npx.cmd"
+          FLUXZY_BIN="fluxzy.cmd"
         else
-          FLUXZY_BIN="npx"
+          FLUXZY_BIN="fluxzy"
         fi
 
-        "$FLUXZY_BIN" @fluxzy/cli start \
-          -l "127.0.0.1:$PROXY_PORT" \
-          -k \
-          -o "$CAPTURE_DIR/fluxzy-capture.har" \
-          > "$CAPTURE_DIR/fluxzy-stdout.log" 2>&1 &
+        FLUXZY_ARGS=(
+          start
+          -l "127.0.0.1:$PROXY_PORT"
+          -k
+          -o "$CAPTURE_DIR/fluxzy-capture.har"
+        )
+
+        if [ -n "$PCAP_FLUXZY_RULE_FILE" ] && [ -f "$PCAP_FLUXZY_RULE_FILE" ]; then
+          FLUXZY_ARGS+=(-r "$PCAP_FLUXZY_RULE_FILE")
+        fi
+
+        "$FLUXZY_BIN" "${FLUXZY_ARGS[@]}" > "$CAPTURE_DIR/fluxzy-stdout.log" 2>&1 &
         FLUXZY_PID=$!
         echo "$FLUXZY_PID" > "$CAPTURE_DIR/fluxzy.pid"
         echo "fluxzy PID: $FLUXZY_PID"
+
+        if [ "$RUNNER_OS" = "Windows" ] && command -v py >/dev/null 2>&1; then
+          PYTHON_CMD=(py -3)
+        elif command -v python3 >/dev/null 2>&1; then
+          PYTHON_CMD=(python3)
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON_CMD=(python)
+        else
+          echo "::error::python is required for proxy readiness checks"
+          exit 1
+        fi
 
         READY=false
         for i in $(seq 1 30); do
@@ -308,7 +421,7 @@ runs:
             break
           fi
 
-          if python -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
+          if "${PYTHON_CMD[@]}" -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
           then
             echo "fluxzy is ready (iteration $i)"
             READY=true
@@ -367,6 +480,17 @@ runs:
         echo "::group::Starting mitmdump on port $PROXY_PORT"
         export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
 
+        if [ "$RUNNER_OS" = "Windows" ] && command -v py >/dev/null 2>&1; then
+          PYTHON_CMD=(py -3)
+        elif command -v python3 >/dev/null 2>&1; then
+          PYTHON_CMD=(python3)
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON_CMD=(python)
+        else
+          echo "::error::python is required for proxy readiness checks"
+          exit 1
+        fi
+
         MITM_ARGS=(
           --mode regular
           --listen-port "$PROXY_PORT"
@@ -396,7 +520,7 @@ runs:
             break
           fi
 
-          if python -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
+          if "${PYTHON_CMD[@]}" -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
           then
             echo "mitmproxy is ready (iteration $i)"
             READY=true

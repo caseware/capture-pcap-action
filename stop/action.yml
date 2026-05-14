@@ -36,7 +36,7 @@ outputs:
     description: 'S3 URI of the uploaded capture bundle.'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'src/main.js'
   post: 'src/post.js'
   post-if: 'always()'

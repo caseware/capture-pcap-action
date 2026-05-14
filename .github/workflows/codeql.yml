@@ -35,7 +35,7 @@ jobs:
           - language: actions
             build-mode: none
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Setup CodeQL (ARM64 compat)
         uses: caseware/codeql-arm64-compat@v1
