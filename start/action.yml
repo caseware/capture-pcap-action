@@ -52,7 +52,7 @@ inputs:
     required: false
     default: '0'
   raw-capture:
-    description: 'Also run tcpdump (Linux) or netsh trace (Windows) for raw packet capture alongside mitmproxy. Default: false (mitmproxy only).'
+    description: 'Also run raw packet capture (tcpdump on Linux/macOS, netsh trace on Windows) alongside the proxy capture. Default: false (proxy-only).'
     required: false
     default: 'false'
   ignore-hosts:
@@ -130,8 +130,8 @@ runs:
         echo "PCAP_FILTER_MAX_BODY_SIZE=$INPUT_FILTER_MAX_BODY_SIZE" >> "$GITHUB_ENV"
 
     # ── Install proxy tool ──────────────────────────────────────────────
-    - name: Install Fluxzy (Linux)
-      if: runner.os == 'Linux' && inputs.proxy-tool == 'fluxzy'
+    - name: Install Fluxzy
+      if: inputs.proxy-tool == 'fluxzy'
       shell: bash
       env:
         FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
@@ -145,67 +145,32 @@ runs:
         fluxzy --help >/dev/null
         echo "::endgroup::"
 
-    - name: Install Fluxzy (Windows)
-      if: runner.os == 'Windows' && inputs.proxy-tool == 'fluxzy'
-      shell: pwsh
-      env:
-        FLUXZY_VERSION: ${{ inputs.fluxzy-version }}
-      run: |
-        Write-Host "::group::Installing Fluxzy CLI"
-        if ($env:FLUXZY_VERSION -eq "latest") {
-          npm install -g @fluxzy/cli
-        } else {
-          npm install -g "@fluxzy/cli@$env:FLUXZY_VERSION"
-        }
-        fluxzy --help | Out-Null
-        Write-Host "::endgroup::"
-
-    - name: Install mitmproxy (Linux)
-      if: runner.os == 'Linux' && inputs.proxy-tool == 'mitmproxy'
+    - name: Install mitmproxy
+      if: inputs.proxy-tool == 'mitmproxy'
       shell: bash
       env:
         MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
       run: |
-        ARCH=$(uname -m)
-        INSTALL_DIR="$HOME/.local/bin"
-        mkdir -p "$INSTALL_DIR"
+        set -euo pipefail
+        echo "::group::Installing mitmproxy $MITMPROXY_VERSION on $RUNNER_OS"
 
-        if [ "$ARCH" = "x86_64" ]; then
-          # x86_64: use standalone binary (works on any Python version)
-          echo "::group::Installing mitmproxy $MITMPROXY_VERSION (standalone binary)"
-          DOWNLOAD_URL="https://downloads.mitmproxy.org/${MITMPROXY_VERSION}/mitmproxy-${MITMPROXY_VERSION}-linux-x86_64.tar.gz"
-          echo "Downloading $DOWNLOAD_URL"
-          curl -fsSL "$DOWNLOAD_URL" | tar -xz -C "$INSTALL_DIR" mitmdump
-          chmod +x "$INSTALL_DIR/mitmdump"
+        if command -v python3 >/dev/null 2>&1; then
+          PYTHON_BIN=python3
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON_BIN=python
         else
-          # ARM64 / other: standalone binary not available, use pip
-          echo "::group::Installing mitmproxy $MITMPROXY_VERSION (pip — ARM64)"
-          pip install --user "mitmproxy==$MITMPROXY_VERSION"
+          echo "::error::python is required to install mitmproxy"
+          exit 1
         fi
 
-        echo "$INSTALL_DIR" >> "$GITHUB_PATH"
-        export PATH="$INSTALL_DIR:$PATH"
+        "$PYTHON_BIN" -m pip install --user "mitmproxy==$MITMPROXY_VERSION"
+
+        SCRIPTS_DIR="$($PYTHON_BIN -c 'import sysconfig; print(sysconfig.get_path("scripts"))')"
+        echo "$SCRIPTS_DIR" >> "$GITHUB_PATH"
+        export PATH="$SCRIPTS_DIR:$PATH"
+
         mitmdump --version
         echo "::endgroup::"
-
-    - name: Install mitmproxy (Windows)
-      if: runner.os == 'Windows' && inputs.proxy-tool == 'mitmproxy'
-      shell: pwsh
-      env:
-        MITMPROXY_VERSION: ${{ inputs.mitmproxy-version }}
-      run: |
-        Write-Host "::group::Installing mitmproxy $env:MITMPROXY_VERSION (standalone binary)"
-        $installDir = Join-Path $env:USERPROFILE ".local" "bin"
-        New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-        $url = "https://downloads.mitmproxy.org/$env:MITMPROXY_VERSION/mitmproxy-$env:MITMPROXY_VERSION-windows-x86_64.zip"
-        $zipPath = Join-Path $env:RUNNER_TEMP "mitmproxy.zip"
-        Write-Host "Downloading $url"
-        Invoke-WebRequest -Uri $url -OutFile $zipPath
-        Expand-Archive -Path $zipPath -DestinationPath $installDir -Force
-        echo $installDir >> $env:GITHUB_PATH
-        $env:PATH = "$installDir;$env:PATH"
-        mitmdump --version
-        Write-Host "::endgroup::"
 
     # ── Generate CA and install it as trusted ──────────────────────────
     - name: Generate mitmproxy CA
@@ -250,15 +215,20 @@ runs:
         fi
         openssl x509 -in "$CERT_PATH" -noout -subject -dates
 
-    - name: Trust CA (Linux)
-      if: runner.os == 'Linux'
+    - name: Trust CA (Linux/macOS)
+      if: runner.os != 'Windows'
       shell: bash
       env:
         PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
       run: |
-        sudo cp "$PROXY_CA_CERT" \
-          /usr/local/share/ca-certificates/mitmproxy-ca.crt
-        sudo update-ca-certificates
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          sudo cp "$PROXY_CA_CERT" \
+            /usr/local/share/ca-certificates/mitmproxy-ca.crt
+          sudo update-ca-certificates
+        else
+          sudo security add-trusted-cert -d -r trustRoot \
+            -k /Library/Keychains/System.keychain "$PROXY_CA_CERT"
+        fi
 
     - name: Trust CA (Windows)
       if: runner.os == 'Windows'
@@ -270,16 +240,25 @@ runs:
         Import-Certificate -FilePath $certPath -CertStoreLocation Cert:\LocalMachine\Root
 
     # ── Start packet capture (opt-in) ──────────────────────────────────
-    - name: Start tcpdump (Linux)
-      if: runner.os == 'Linux' && inputs.raw-capture == 'true'
+    - name: Start tcpdump (Unix)
+      if: runner.os != 'Windows' && inputs.raw-capture == 'true'
       shell: bash
       env:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
       run: |
         echo "::group::Starting tcpdump"
-        sudo bash -c "tcpdump -i any -w '$CAPTURE_DIR/raw-capture.pcap' -U tcp &
+        if [ "$RUNNER_OS" = "Linux" ]; then
+          IFACE="any"
+        else
+          IFACE="$(route -n get default 2>/dev/null | awk '/interface:/{print $2;exit}')"
+          if [ -z "$IFACE" ]; then
+            IFACE="en0"
+          fi
+        fi
+        sudo bash -c "tcpdump -i '$IFACE' -w '$CAPTURE_DIR/raw-capture.pcap' -U tcp &
           echo \$! > '$CAPTURE_DIR/tcpdump.pid'"
         sleep 1
+        echo "tcpdump interface: $IFACE ($RUNNER_OS)"
         echo "tcpdump PID: $(cat "$CAPTURE_DIR/tcpdump.pid")"
         echo "::endgroup::"
 
@@ -295,17 +274,24 @@ runs:
         Write-Host "::endgroup::"
 
     # ── Start selected proxy tool ───────────────────────────────────────
-    - name: Start Fluxzy (Linux)
-      if: runner.os == 'Linux' && inputs.proxy-tool == 'fluxzy'
+    - name: Start Fluxzy
+      if: inputs.proxy-tool == 'fluxzy'
       shell: bash
       env:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
         PROXY_PORT: ${{ inputs.proxy-port }}
       run: |
+        set -euo pipefail
         echo "::group::Starting fluxzy on port $PROXY_PORT"
         export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
 
-        fluxzy start \
+        if [ "$RUNNER_OS" = "Windows" ]; then
+          FLUXZY_BIN="npx.cmd"
+        else
+          FLUXZY_BIN="npx"
+        fi
+
+        "$FLUXZY_BIN" @fluxzy/cli start \
           -l "127.0.0.1:$PROXY_PORT" \
           -k \
           -o "$CAPTURE_DIR/fluxzy-capture.har" \
@@ -321,7 +307,9 @@ runs:
             cat "$CAPTURE_DIR/fluxzy-stdout.log" 2>/dev/null || true
             break
           fi
-          if ss -tlnp 2>/dev/null | grep -q ":$PROXY_PORT "; then
+
+          if python -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
+          then
             echo "fluxzy is ready (iteration $i)"
             READY=true
             break
@@ -338,107 +326,68 @@ runs:
         fi
         echo "::endgroup::"
 
-    - name: Start Fluxzy (Windows)
-      if: runner.os == 'Windows' && inputs.proxy-tool == 'fluxzy'
-      shell: pwsh
-      env:
-        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
-        PROXY_PORT: ${{ inputs.proxy-port }}
-      run: |
-        Write-Host "::group::Starting fluxzy on port $env:PROXY_PORT"
-        $sslKeyLog = Join-Path $env:CAPTURE_DIR "sslkeys.log"
-        $env:SSLKEYLOGFILE = $sslKeyLog
-
-        $allArgs = @(
-          "@fluxzy/cli",
-          "start",
-          "-l", "127.0.0.1:$env:PROXY_PORT",
-          "-k",
-          "-o", (Join-Path $env:CAPTURE_DIR "fluxzy-capture.har")
-        )
-
-        $proc = Start-Process -PassThru -NoNewWindow -FilePath "npx.cmd" `
-          -ArgumentList $allArgs
-        $proc.Id | Out-File -FilePath (Join-Path $env:CAPTURE_DIR "fluxzy.pid") -NoNewline
-        Write-Host "fluxzy PID: $($proc.Id)"
-
-        $ready = $false
-        for ($i = 1; $i -le 30; $i++) {
-          if ($proc.HasExited) {
-            Write-Host "::warning::fluxzy exited early"
-            break
-          }
-          $listener = Get-NetTCPConnection -LocalPort $env:PROXY_PORT `
-            -State Listen -ErrorAction SilentlyContinue
-          if ($listener) {
-            Write-Host "fluxzy is ready (iteration $i)"
-            $ready = $true
-            break
-          }
-          Start-Sleep -Seconds 1
-        }
-        if ($ready) {
-          echo "PCAP_PROXY_READY=true" >> $env:GITHUB_ENV
-        } else {
-          Write-Host "::warning::fluxzy readiness check timed out"
-          echo "PCAP_PROXY_READY=false" >> $env:GITHUB_ENV
-        }
-        Write-Host "::endgroup::"
-
-    - name: Start mitmproxy (Linux)
-      if: runner.os == 'Linux' && inputs.proxy-tool == 'mitmproxy'
+    - name: Prepare mitmproxy options
+      if: inputs.proxy-tool == 'mitmproxy'
       shell: bash
       env:
-        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
-        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
-        PROXY_PORT: ${{ inputs.proxy-port }}
-        PCAP_FILTER_DOMAINS: ${{ inputs.filter-domains }}
-        PCAP_FILTER_EXCLUDE_DOMAINS: ${{ inputs.filter-exclude-domains }}
-        PCAP_FILTER_REFERERS: ${{ inputs.filter-referers }}
-        PCAP_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
-        PCAP_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
         PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
       run: |
-        echo "::group::Starting mitmdump on port $PROXY_PORT"
-        export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
-
-        # Resolve path to the filter addon relative to this action
         ACTION_DIR="${GITHUB_ACTION_PATH:-.}"
         ADDON_PATH="$ACTION_DIR/../scripts/filter-addon.py"
         if [ ! -f "$ADDON_PATH" ]; then
           ADDON_PATH="$(cd "$(dirname "$0")/../scripts" 2>/dev/null && pwd)/filter-addon.py"
         fi
 
-        ADDON_FLAG=""
         if [ -f "$ADDON_PATH" ]; then
-          ADDON_FLAG="--scripts $ADDON_PATH"
+          echo "PCAP_MITM_ADDON_PATH=$ADDON_PATH" >> "$GITHUB_ENV"
           echo "Filter addon: $ADDON_PATH"
         else
+          echo "PCAP_MITM_ADDON_PATH=" >> "$GITHUB_ENV"
           echo "::warning::Filter addon not found at $ADDON_PATH"
         fi
 
-        # Build --ignore-hosts flag for transparent tunneling of CI infra
-        IGNORE_FLAG=""
         if [ -n "$PCAP_IGNORE_HOSTS" ]; then
-          IGNORE_FLAG="--ignore-hosts $PCAP_IGNORE_HOSTS"
+          echo "PCAP_MITM_IGNORE_HOSTS=$PCAP_IGNORE_HOSTS" >> "$GITHUB_ENV"
           echo "Ignore hosts (transparent tunnel): $PCAP_IGNORE_HOSTS"
+        else
+          echo "PCAP_MITM_IGNORE_HOSTS=" >> "$GITHUB_ENV"
         fi
 
-        mitmdump \
-          --mode regular \
-          --listen-port "$PROXY_PORT" \
-          --set confdir="$MITMPROXY_HOME" \
-          --set ssl_insecure=true \
-          --save-stream-file "$CAPTURE_DIR/mitmproxy-flows" \
-          $ADDON_FLAG \
-          $IGNORE_FLAG \
-          --quiet \
-          > "$CAPTURE_DIR/mitmdump-stdout.log" 2>&1 &
+    - name: Start mitmproxy
+      if: inputs.proxy-tool == 'mitmproxy'
+      shell: bash
+      env:
+        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
+        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
+        PROXY_PORT: ${{ inputs.proxy-port }}
+        PCAP_MITM_ADDON_PATH: ${{ env.PCAP_MITM_ADDON_PATH }}
+        PCAP_MITM_IGNORE_HOSTS: ${{ env.PCAP_MITM_IGNORE_HOSTS }}
+      run: |
+        set -euo pipefail
+        echo "::group::Starting mitmdump on port $PROXY_PORT"
+        export SSLKEYLOGFILE="$CAPTURE_DIR/sslkeys.log"
+
+        MITM_ARGS=(
+          --mode regular
+          --listen-port "$PROXY_PORT"
+          --set "confdir=$MITMPROXY_HOME"
+          --set "ssl_insecure=true"
+          --save-stream-file "$CAPTURE_DIR/mitmproxy-flows"
+          --quiet
+        )
+
+        if [ -n "$PCAP_MITM_ADDON_PATH" ] && [ -f "$PCAP_MITM_ADDON_PATH" ]; then
+          MITM_ARGS+=(--scripts "$PCAP_MITM_ADDON_PATH")
+        fi
+        if [ -n "$PCAP_MITM_IGNORE_HOSTS" ]; then
+          MITM_ARGS+=(--ignore-hosts "$PCAP_MITM_IGNORE_HOSTS")
+        fi
+
+        mitmdump "${MITM_ARGS[@]}" > "$CAPTURE_DIR/mitmdump-stdout.log" 2>&1 &
         MITM_PID=$!
         echo "$MITM_PID" > "$CAPTURE_DIR/mitmdump.pid"
         echo "mitmdump PID: $MITM_PID"
 
-        # Wait for proxy to be ready (TCP port check).
         READY=false
         for i in $(seq 1 30); do
           if ! kill -0 "$MITM_PID" 2>/dev/null; then
@@ -446,97 +395,28 @@ runs:
             cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
             break
           fi
-          if ss -tlnp 2>/dev/null | grep -q ":$PROXY_PORT "; then
+
+          if python -c 'import socket,sys; port=int(sys.argv[1]); s=socket.socket(socket.AF_INET,socket.SOCK_STREAM); s.settimeout(0.25); ok=(s.connect_ex(("127.0.0.1",port))==0); s.close(); raise SystemExit(0 if ok else 1)' "$PROXY_PORT"
+          then
             echo "mitmproxy is ready (iteration $i)"
             READY=true
             break
           fi
           sleep 1
         done
+
         if [ "$READY" = "true" ]; then
           echo "PCAP_PROXY_READY=true" >> "$GITHUB_ENV"
         else
           echo "::warning::mitmproxy readiness check timed out"
           cat "$CAPTURE_DIR/mitmdump-stdout.log" 2>/dev/null || true
-          ps -p "$MITM_PID" -o pid,stat,time,cmd 2>/dev/null \
-            || echo "Process $MITM_PID not running"
           echo "PCAP_PROXY_READY=false" >> "$GITHUB_ENV"
         fi
         echo "::endgroup::"
 
-    - name: Start mitmproxy (Windows)
-      if: runner.os == 'Windows' && inputs.proxy-tool == 'mitmproxy'
-      shell: pwsh
-      env:
-        CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
-        MITMPROXY_HOME: ${{ steps.setup-dirs.outputs.mitmproxy-home }}
-        PROXY_PORT: ${{ inputs.proxy-port }}
-        PCAP_FILTER_DOMAINS: ${{ inputs.filter-domains }}
-        PCAP_FILTER_EXCLUDE_DOMAINS: ${{ inputs.filter-exclude-domains }}
-        PCAP_FILTER_REFERERS: ${{ inputs.filter-referers }}
-        PCAP_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
-        PCAP_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
-        PCAP_IGNORE_HOSTS: ${{ inputs.ignore-hosts }}
-      run: |
-        Write-Host "::group::Starting mitmdump on port $env:PROXY_PORT"
-        $sslKeyLog = Join-Path $env:CAPTURE_DIR "sslkeys.log"
-        $env:SSLKEYLOGFILE = $sslKeyLog
-
-        $actionDir = $env:GITHUB_ACTION_PATH
-        $addonPath = Join-Path $actionDir ".." "scripts" "filter-addon.py"
-
-        $addonArgs = @()
-        if (Test-Path $addonPath) {
-          $addonArgs = @("--scripts", $addonPath)
-          Write-Host "Filter addon: $addonPath"
-        }
-
-        $ignoreArgs = @()
-        if ($env:PCAP_IGNORE_HOSTS) {
-          $ignoreArgs = @("--ignore-hosts", $env:PCAP_IGNORE_HOSTS)
-          Write-Host "Ignore hosts (transparent tunnel): $env:PCAP_IGNORE_HOSTS"
-        }
-
-        $allArgs = @(
-          "--mode", "regular",
-          "--listen-port", $env:PROXY_PORT,
-          "--set", "confdir=$env:MITMPROXY_HOME",
-          "--set", "ssl_insecure=true",
-          "--save-stream-file", (Join-Path $env:CAPTURE_DIR "mitmproxy-flows"),
-          "--quiet"
-        ) + $addonArgs + $ignoreArgs
-
-        $proc = Start-Process -PassThru -NoNewWindow -FilePath "mitmdump" `
-          -ArgumentList $allArgs
-        $proc.Id | Out-File -FilePath (Join-Path $env:CAPTURE_DIR "mitmdump.pid") -NoNewline
-        Write-Host "mitmdump PID: $($proc.Id)"
-
-        $ready = $false
-        for ($i = 1; $i -le 30; $i++) {
-          if ($proc.HasExited) {
-            Write-Host "::warning::mitmdump exited early"
-            break
-          }
-          $listener = Get-NetTCPConnection -LocalPort $env:PROXY_PORT `
-            -State Listen -ErrorAction SilentlyContinue
-          if ($listener) {
-            Write-Host "mitmproxy is ready (iteration $i)"
-            $ready = $true
-            break
-          }
-          Start-Sleep -Seconds 1
-        }
-        if ($ready) {
-          echo "PCAP_PROXY_READY=true" >> $env:GITHUB_ENV
-        } else {
-          Write-Host "::warning::mitmproxy readiness check timed out"
-          echo "PCAP_PROXY_READY=false" >> $env:GITHUB_ENV
-        }
-        Write-Host "::endgroup::"
-
     # ── Trust CA in Java truststore (if JAVA_HOME is set) ────────────
     - name: Trust CA (Java)
-      if: runner.os == 'Linux' && env.PCAP_PROXY_READY == 'true'
+      if: env.PCAP_PROXY_READY == 'true'
       shell: bash
       env:
         PROXY_CA_CERT: ${{ steps.setup-dirs.outputs.ca-cert }}
@@ -545,16 +425,25 @@ runs:
           CACERTS="$JAVA_HOME/lib/security/cacerts"
           if [ -f "$CACERTS" ]; then
             echo "Adding proxy CA to Java truststore: $CACERTS"
-            sudo keytool -importcert -noprompt \
-              -keystore "$CACERTS" -storepass changeit \
-              -alias mitmproxy-ca \
-              -file "$PROXY_CA_CERT" 2>/dev/null || true
+            if [ -w "$CACERTS" ]; then
+              keytool -importcert -noprompt \
+                -keystore "$CACERTS" -storepass changeit \
+                -alias mitmproxy-ca \
+                -file "$PROXY_CA_CERT" 2>/dev/null || true
+            elif command -v sudo >/dev/null 2>&1; then
+              sudo keytool -importcert -noprompt \
+                -keystore "$CACERTS" -storepass changeit \
+                -alias mitmproxy-ca \
+                -file "$PROXY_CA_CERT" 2>/dev/null || true
+            else
+              echo "::warning::Cannot write Java cacerts at $CACERTS (no write permission and no sudo)"
+            fi
           fi
         fi
 
     # ── Export proxy settings ──────────────────────────────────────────
-    # All TLS traffic is MITM-intercepted. The mitmproxy CA is trusted
-    # system-wide (update-ca-certificates), for Node.js (NODE_EXTRA_CA_CERTS),
+    # All TLS traffic is MITM-intercepted. The proxy CA is trusted
+    # in the OS trust store, for Node.js (NODE_EXTRA_CA_CERTS),
     # and for Java (keytool import above).
     - name: Configure proxy environment
       if: env.PCAP_PROXY_READY == 'true'

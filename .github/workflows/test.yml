@@ -52,11 +52,18 @@ jobs:
   # Integration test: capture HTTPS traffic -> verify PCAP -> upload to MinIO
   # ───────────────────────────────────────────────────────────────────
   test-linux:
-    name: "Integration test (Linux, ${{ matrix.proxy-tool }})"
-    runs-on: ubuntu-24.04-arm
+    name: "Integration test (${{ matrix.platform.label }}, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
+        platform:
+          - label: Linux
+            runner: ubuntu-24.04-arm
+            mc_arch: arm64
+          - label: Linux (AMD64)
+            runner: ubuntu-24.04
+            mc_arch: amd64
         proxy-tool: [fluxzy, mitmproxy]
     permissions:
       contents: read
@@ -81,8 +88,10 @@ jobs:
           done
 
       - name: Create MinIO bucket
+        env:
+          MC_ARCH: ${{ matrix.platform.mc_arch }}
         run: |
-          curl -sL https://dl.min.io/client/mc/release/linux-arm64/mc \
+          curl -sL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" \
             -o /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set local http://localhost:9000 minioadmin minioadmin
@@ -209,11 +218,16 @@ jobs:
   # Test without filters (all traffic)
   # ───────────────────────────────────────────────────────────────────
   test-linux-unfiltered:
-    name: "Integration test (Linux, no filter, ${{ matrix.proxy-tool }})"
-    runs-on: ubuntu-24.04-arm
+    name: "Integration test (${{ matrix.platform.label }}, no filter, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
+        platform:
+          - label: Linux
+            runner: ubuntu-24.04-arm
+          - label: Linux (AMD64)
+            runner: ubuntu-24.04
         proxy-tool: [fluxzy, mitmproxy]
     permissions:
       contents: read
@@ -263,7 +277,7 @@ jobs:
 
   test-windows:
     name: "Integration test (Windows, ${{ matrix.proxy-tool }})"
-    runs-on: windows-latest
+    runs-on: windows-2022
     strategy:
       fail-fast: false
       matrix:
@@ -343,3 +357,65 @@ jobs:
           } else {
             Write-Host "::warning::SSL keylog not found"
           }
+
+  test-macos:
+    name: "Integration test (${{ matrix.platform.label }}, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: macOS (arm64)
+            runner: macos-26
+          - label: macOS (x64)
+            runner: macos-26-intel
+        proxy-tool: [fluxzy, mitmproxy]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Start PCAP capture
+        uses: ./start
+        id: pcap-start
+        with:
+          proxy-tool: ${{ matrix.proxy-tool }}
+
+      - name: Make test HTTPS requests (via proxy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CA_CERT="${{ steps.pcap-start.outputs.ca-cert }}"
+
+          curl -sS --max-time 20 --cacert "$CA_CERT" \
+            -o /dev/null -w "google.com: HTTP %{http_code}\n" \
+            https://www.google.com || true
+          curl -sS --max-time 20 --cacert "$CA_CERT" \
+            -o /dev/null -w "example.com: HTTP %{http_code}\n" \
+            https://example.com || true
+
+      - name: Stop capture
+        uses: ./stop
+        id: pcap-stop
+        with:
+          s3-bucket: dummy-bucket
+          s3-endpoint: http://localhost:9999
+          artifact-name: macos-test
+        continue-on-error: true
+
+      - name: Verify capture artifacts (macOS)
+        shell: bash
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
+        run: |
+          set -euo pipefail
+          CAPTURE_DIR="$PCAP_CAPTURE_DIR"
+          echo "Capture dir: $CAPTURE_DIR"
+          ls -lah "$CAPTURE_DIR/" || true
+
+          [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::warning::SSL keys missing"
+          if [ "$PROXY_TOOL" = "fluxzy" ]; then
+            [ -f "$CAPTURE_DIR/fluxzy-capture.har" ] && echo "Fluxzy HAR: OK" || echo "::warning::Fluxzy HAR missing"
+          else
+            [ -f "$CAPTURE_DIR/mitmproxy-flows" ] && echo "mitmproxy flows: OK" || echo "::warning::mitmproxy flows missing"
+          fi
