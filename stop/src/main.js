@@ -89,6 +89,93 @@ async function stopFluxzyProcess(pid) {
   }
 }
 
+function parseFilterList(csvString) {
+  return (csvString || "").split(",").map(s => s.trim()).filter(s => s);
+}
+
+function globMatch(value, pattern) {
+  // Build regex safely from glob syntax: * = any chars, ? = single char
+  let regexSource = "^";
+  for (const ch of pattern.toLowerCase()) {
+    if (ch === "*") {
+      regexSource += ".*";
+    } else if (ch === "?") {
+      regexSource += ".";
+    } else {
+      // Escape regex metacharacters from untrusted input patterns
+      regexSource += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+  }
+  regexSource += "$";
+  const regex = new RegExp(regexSource);
+  return regex.test(value.toLowerCase());
+}
+
+function hostMatches(host, patterns) {
+  return patterns.some(p => globMatch(host, p));
+}
+
+async function filterHarFile(harPath) {
+  if (!(await exists(harPath))) {
+    return;
+  }
+
+  try {
+    const domainAllow = parseFilterList(process.env.PCAP_FILTER_DOMAINS || "");
+    const domainDeny = parseFilterList(process.env.PCAP_FILTER_EXCLUDE_DOMAINS || "");
+
+    // If no filters configured, skip post-processing
+    if (!domainAllow.length && !domainDeny.length) {
+      return;
+    }
+
+    const harContent = await fs.readFile(harPath, "utf8");
+    const har = JSON.parse(harContent);
+
+    const entries = har.log?.entries || [];
+    const originalCount = entries.length;
+
+    // Filter entries based on domain rules
+    har.log.entries = entries.filter((entry) => {
+      const url = entry.request?.url || "";
+      let host = "";
+      try {
+        host = new URL(url).hostname || "";
+      } catch {
+        return true;
+      }
+
+      if (!host) return true;
+
+      // Domain allowlist: if configured, only keep matching domains
+      if (domainAllow.length && !hostMatches(host, domainAllow)) {
+        return false;
+      }
+
+      // Domain denylist: if configured, drop matching domains
+      if (domainDeny.length && hostMatches(host, domainDeny)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const filteredCount = har.log.entries.length;
+    const removedCount = originalCount - filteredCount;
+
+    if (removedCount > 0) {
+      console.log(
+        `::group::HAR post-processing: removed ${removedCount} filtered entries (${originalCount} → ${filteredCount})`
+      );
+      await fs.writeFile(harPath, JSON.stringify(har, null, 2));
+      console.log("HAR file updated");
+      console.log("::endgroup::");
+    }
+  } catch (e) {
+    console.warn(`::warning::Failed to post-process HAR file: ${e.message}`);
+  }
+}
+
 async function main() {
   const captureDir =
     getInput("capture-dir") ||
@@ -123,9 +210,22 @@ async function main() {
       await stopFluxzyProcess(pid);
     } else {
       if (os.platform() === "win32") {
-        await run(`taskkill /PID ${pid} /F`, { ignoreError: true });
+        await run(`taskkill /PID ${pid} /T 2>nul || taskkill /PID ${pid} /T /F`, {
+          ignoreError: true,
+        });
+        await sleep(3000);
+        if (await isProcessAlive(pid)) {
+          await run(`taskkill /PID ${pid} /T /F`, { ignoreError: true });
+        }
       } else {
-        await killProcess(pid);
+        await run(`kill -INT ${pid} 2>/dev/null || true`, {
+          ignoreError: true,
+          shell: "/bin/bash",
+        });
+        await sleep(5000);
+        if (await isProcessAlive(pid)) {
+          await killProcess(pid);
+        }
       }
     }
     await fs.unlink(pidFile);
@@ -183,6 +283,9 @@ async function main() {
       harFile,
     ]);
   }
+
+  // Post-process HAR to remove filtered entries
+  await filterHarFile(harFile);
 
   const hasRawCapture = await exists(pcapFile);
 
