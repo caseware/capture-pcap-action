@@ -1,4 +1,4 @@
-const { exec: execCb, spawn } = require("node:child_process");
+const { exec: execCb, execFile: execFileCb, spawn } = require("node:child_process");
 const { promisify } = require("node:util");
 const crypto = require("node:crypto");
 const fs = require("node:fs/promises");
@@ -6,6 +6,7 @@ const path = require("node:path");
 const os = require("node:os");
 
 const exec = promisify(execCb);
+const execFile = promisify(execFileCb);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 async function appendOutput(key, value) {
@@ -42,6 +43,20 @@ async function exists(p) {
   try { await fs.access(p); return true; } catch { return false; }
 }
 
+async function isProcessAlive(pid) {
+  try {
+    process.kill(Number(pid), 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function runFile(command, args, opts = {}) {
+  console.log(`> ${command} ${args.join(" ")}`);
+  await execFile(command, args, opts);
+}
+
 async function killProcess(pid, { sudo = false } = {}) {
   const prefix = sudo ? "sudo " : "";
   await run(`${prefix}kill ${pid} 2>/dev/null || true`, {
@@ -53,6 +68,112 @@ async function killProcess(pid, { sudo = false } = {}) {
     ignoreError: true,
     shell: "/bin/bash",
   });
+}
+
+async function stopFluxzyProcess(pid) {
+  if (os.platform() === "win32") {
+    await run(`taskkill /PID ${pid} /T 2>nul || taskkill /PID ${pid} /T /F`, {
+      ignoreError: true,
+    });
+    return;
+  }
+
+  await run(`kill -INT ${pid} 2>/dev/null || true`, {
+    ignoreError: true,
+    shell: "/bin/bash",
+  });
+  await sleep(5000);
+
+  if (await isProcessAlive(pid)) {
+    await killProcess(pid);
+  }
+}
+
+function parseFilterList(csvString) {
+  return (csvString || "").split(",").map(s => s.trim()).filter(s => s);
+}
+
+function globMatch(value, pattern) {
+  // Build regex safely from glob syntax: * = any chars, ? = single char
+  let regexSource = "^";
+  for (const ch of pattern.toLowerCase()) {
+    if (ch === "*") {
+      regexSource += ".*";
+    } else if (ch === "?") {
+      regexSource += ".";
+    } else {
+      // Escape regex metacharacters from untrusted input patterns
+      regexSource += ch.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
+    }
+  }
+  regexSource += "$";
+  const regex = new RegExp(regexSource);
+  return regex.test(value.toLowerCase());
+}
+
+function hostMatches(host, patterns) {
+  return patterns.some(p => globMatch(host, p));
+}
+
+async function filterHarFile(harPath) {
+  if (!(await exists(harPath))) {
+    return;
+  }
+
+  try {
+    const domainAllow = parseFilterList(process.env.PCAP_FILTER_DOMAINS || "");
+    const domainDeny = parseFilterList(process.env.PCAP_FILTER_EXCLUDE_DOMAINS || "");
+
+    // If no filters configured, skip post-processing
+    if (!domainAllow.length && !domainDeny.length) {
+      return;
+    }
+
+    const harContent = await fs.readFile(harPath, "utf8");
+    const har = JSON.parse(harContent);
+
+    const entries = har.log?.entries || [];
+    const originalCount = entries.length;
+
+    // Filter entries based on domain rules
+    har.log.entries = entries.filter((entry) => {
+      const url = entry.request?.url || "";
+      let host = "";
+      try {
+        host = new URL(url).hostname || "";
+      } catch {
+        return true;
+      }
+
+      if (!host) return true;
+
+      // Domain allowlist: if configured, only keep matching domains
+      if (domainAllow.length && !hostMatches(host, domainAllow)) {
+        return false;
+      }
+
+      // Domain denylist: if configured, drop matching domains
+      if (domainDeny.length && hostMatches(host, domainDeny)) {
+        return false;
+      }
+
+      return true;
+    });
+
+    const filteredCount = har.log.entries.length;
+    const removedCount = originalCount - filteredCount;
+
+    if (removedCount > 0) {
+      console.log(
+        `::group::HAR post-processing: removed ${removedCount} filtered entries (${originalCount} → ${filteredCount})`
+      );
+      await fs.writeFile(harPath, JSON.stringify(har, null, 2));
+      console.log("HAR file updated");
+      console.log("::endgroup::");
+    }
+  } catch (e) {
+    console.warn(`::warning::Failed to post-process HAR file: ${e.message}`);
+  }
 }
 
 async function main() {
@@ -69,31 +190,57 @@ async function main() {
   }
 
   console.log(`Capture directory: ${captureDir}`);
+  const proxyTool = (process.env.PCAP_PROXY_TOOL || "mitmproxy").toLowerCase();
+  console.log(`Proxy tool: ${proxyTool}`);
 
-  // ── Stop mitmproxy ──────────────────────────────────────────────
-  const mitmdumpPidFile = path.join(captureDir, "mitmdump.pid");
-  if (await exists(mitmdumpPidFile)) {
-    const pid = (await fs.readFile(mitmdumpPidFile, "utf8")).trim();
-    console.log(`Stopping mitmdump (PID ${pid})...`);
-    if (os.platform() === "win32") {
-      await run(`taskkill /PID ${pid} /F`, { ignoreError: true });
+  // ── Stop proxy process ──────────────────────────────────────────
+  const pidFile =
+    proxyTool === "fluxzy"
+      ? path.join(captureDir, "fluxzy.pid")
+      : path.join(captureDir, "mitmdump.pid");
+  const logFile =
+    proxyTool === "fluxzy"
+      ? path.join(captureDir, "fluxzy-stdout.log")
+      : path.join(captureDir, "mitmdump-stdout.log");
+
+  if (await exists(pidFile)) {
+    const pid = (await fs.readFile(pidFile, "utf8")).trim();
+    console.log(`Stopping ${proxyTool} (PID ${pid})...`);
+    if (proxyTool === "fluxzy") {
+      await stopFluxzyProcess(pid);
     } else {
-      await killProcess(pid);
+      if (os.platform() === "win32") {
+        await run(`taskkill /PID ${pid} /T 2>nul || taskkill /PID ${pid} /T /F`, {
+          ignoreError: true,
+        });
+        await sleep(3000);
+        if (await isProcessAlive(pid)) {
+          await run(`taskkill /PID ${pid} /T /F`, { ignoreError: true });
+        }
+      } else {
+        await run(`kill -INT ${pid} 2>/dev/null || true`, {
+          ignoreError: true,
+          shell: "/bin/bash",
+        });
+        await sleep(5000);
+        if (await isProcessAlive(pid)) {
+          await killProcess(pid);
+        }
+      }
     }
-    await fs.unlink(mitmdumpPidFile);
-    console.log("mitmdump stopped");
+    await fs.unlink(pidFile);
+    console.log(`${proxyTool} stopped`);
 
-    const mitmdumpLog = path.join(captureDir, "mitmdump-stdout.log");
-    if (await exists(mitmdumpLog)) {
-      const log = (await fs.readFile(mitmdumpLog, "utf8")).trim();
+    if (await exists(logFile)) {
+      const log = (await fs.readFile(logFile, "utf8")).trim();
       if (log) {
-        console.log("::group::mitmdump log");
+        console.log(`::group::${proxyTool} log`);
         console.log(log);
         console.log("::endgroup::");
       }
     }
   } else {
-    console.log("::warning::mitmdump PID file not found");
+    console.log(`::warning::${proxyTool} PID file not found`);
   }
 
   // ── Stop tcpdump / netsh ────────────────────────────────────────
@@ -125,8 +272,20 @@ async function main() {
   // ── Finalize artifacts ──────────────────────────────────────────
   const pcapFile = path.join(captureDir, "raw-capture.pcap");
   const sslKeylog = path.join(captureDir, "sslkeys.log");
-  const caCert = path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
-  const flowsFile = path.join(captureDir, "mitmproxy-flows");
+  const caCert = process.env.PCAP_CA_CERT || path.join(captureDir, ".mitmproxy", "mitmproxy-ca-cert.pem");
+  const fluxzyDumpDir = process.env.PCAP_FLUXZY_DUMP_DIR || path.join(captureDir, "fluxzy-dump");
+  const harFile = path.join(captureDir, "capture.har");
+
+  if (proxyTool === "fluxzy") {
+    await runFile(os.platform() === "win32" ? "fluxzy.cmd" : "fluxzy", [
+      "pack",
+      fluxzyDumpDir,
+      harFile,
+    ]);
+  }
+
+  // Post-process HAR to remove filtered entries
+  await filterHarFile(harFile);
 
   const hasRawCapture = await exists(pcapFile);
 
@@ -155,9 +314,9 @@ async function main() {
   const bundleDir = path.join(captureDir, "bundle");
   await fs.mkdir(bundleDir, { recursive: true });
 
-  // Always include mitmproxy flows; only include raw PCAP, SSL keys,
+  // Always include proxy capture output; only include raw PCAP, SSL keys,
   // and CA cert when raw capture was active (tcpdump/netsh produced a file).
-  const bundleFiles = [flowsFile];
+  const bundleFiles = [harFile];
   if (hasRawCapture) {
     bundleFiles.push(pcapFile, sslKeylog, caCert);
   }

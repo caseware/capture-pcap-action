@@ -1,14 +1,14 @@
 # Capture PCAP — GitHub Action
 
-Capture e2e and regression test traffic as a **TLS-decryptable PCAP bundle** and upload it to S3.
+Capture e2e and regression test traffic as a **TLS-decryptable capture bundle** and upload it to S3.
 
 ## How it works
 
-1. **`start/`** — Installs [mitmproxy](https://mitmproxy.org/) as a forward proxy, trusts its root CA on the OS, loads an inline filter addon, and exports `HTTP_PROXY` / `HTTPS_PROXY` so downstream tests route through the proxy automatically. Optionally starts `tcpdump` (Linux) or `netsh trace` (Windows) for raw packet capture when `raw-capture: true`.
+1. **`start/`** — Installs either [Fluxzy](https://github.com/haga-rak/fluxzy.core) or [mitmproxy](https://mitmproxy.org/) as a forward proxy, trusts its root CA on the OS, and exports `HTTP_PROXY` / `HTTPS_PROXY` so downstream tests route through the proxy automatically. Fluxzy is the default. Optionally starts `tcpdump` (Linux) or `netsh trace` (Windows) for raw packet capture when `raw-capture: true`.
 
 2. **`stop/`** — Stops the proxy and packet capture, bundles the PCAP + TLS session keys (`SSLKEYLOGFILE`) + CA cert into a `.tar.gz`. The **S3 upload runs as a post step** so it executes even if subsequent steps fail.
 
-Filtering happens **inline** in the mitmproxy addon — traffic that doesn't match the filter criteria is dropped before it hits the flow file, keeping captures small on disk.
+When `proxy-tool: mitmproxy`, filtering happens **inline** in the mitmproxy addon.
 
 The resulting bundle can be opened in [Wireshark](https://www.wireshark.org/) with full TLS decryption using the included `sslkeys.log` file.
 
@@ -34,6 +34,8 @@ jobs:
       # Start capturing BEFORE e2e tests
       - uses: caseware/capture-pcap-action/start@v1
         id: pcap
+        with:
+          proxy-tool: fluxzy
 
       # Your e2e tests run here — HTTP_PROXY/HTTPS_PROXY are set automatically
       - name: Run e2e tests
@@ -74,10 +76,12 @@ Only capture traffic to your own services:
 
 | Input | Default | Description |
 |-------|---------|-------------|
+| `proxy-tool` | `fluxzy` | Proxy tool to run: `fluxzy` or `mitmproxy` |
 | `proxy-port` | `8080` | Port for the mitmproxy forward proxy |
 | `capture-dir` | `$RUNNER_TEMP/pcap-capture` | Directory for capture artifacts |
 | `process-name` | _(empty)_ | _(reserved, not yet implemented)_ Process name filter |
 | `mitmproxy-version` | `11.0.2` | mitmproxy version to install |
+| `fluxzy-version` | `latest` | Fluxzy CLI version to install when `proxy-tool=fluxzy` |
 | `filter-domains` | _(empty)_ | Domain allowlist (comma-sep, globs OK, e.g. `*.caseware.com`) |
 | `filter-exclude-domains` | _(empty)_ | Domain denylist (comma-sep, globs OK) |
 | `filter-referers` | _(empty)_ | Referer patterns to keep (comma-sep, globs OK) |
@@ -106,7 +110,7 @@ Only capture traffic to your own services:
 | Output | Description |
 |--------|-------------|
 | `capture-dir` | Path to the capture artifacts directory |
-| `ca-cert` | Path to the mitmproxy root CA PEM |
+| `ca-cert` | Path to the proxy root CA certificate |
 | `proxy-url` | Proxy URL (`http://127.0.0.1:<port>`) |
 
 ### `stop/`
@@ -120,20 +124,14 @@ Only capture traffic to your own services:
 
 ## Inline filtering
 
-Filtering is applied **inside the mitmproxy addon** (`scripts/filter-addon.py`)
-at request/response time. Filtered flows are killed immediately — they never
-reach the flow file on disk. This means:
-
-- The flow file only contains traffic that passes the filter
-- No post-processing ETL step is needed
-- The resulting bundle is smaller from the start
+Filtering is applied inline when `proxy-tool: mitmproxy` via the addon (`scripts/filter-addon.py`) at request/response time.
 
 When `raw-capture: true` is set, the raw PCAP (tcpdump/netsh) captures all
 packets regardless of the filter. This is useful for debugging network issues
 that the proxy filter might mask. Use the `sslkeys.log` + PCAP in Wireshark
-for full visibility, and the mitmproxy flows for the filtered view.
+for full visibility, and `capture.har` for the filtered proxy view.
 
-By default (`raw-capture: false`), only mitmproxy runs — this is lighter,
+By default (`raw-capture: false`), only the selected proxy runs — this is lighter,
 faster, and avoids the `sudo`/admin requirements of tcpdump/netsh.
 
 ## Decrypting the PCAP in Wireshark
@@ -146,13 +144,14 @@ faster, and avoids the `sudo`/admin requirements of tcpdump/netsh.
 
 ## Platform support
 
-| Feature | Linux | Windows |
-|---------|-------|---------|
-| mitmproxy TLS interception | pip install | pip install |
-| Inline flow filtering | addon | addon |
-| Raw packet capture | tcpdump | netsh trace + etl2pcapng |
-| CA trust | update-ca-certificates | Import-Certificate |
-| S3 upload (post step) | aws cli | aws cli |
+| Feature | Linux | macOS | Windows |
+|---------|-------|-------|---------|
+| Fluxzy TLS interception | npm install | npm install | npm install |
+| mitmproxy TLS interception | pip install | pip install | pip install |
+| Filtering | mitmproxy addon (inline) | mitmproxy addon (inline) | mitmproxy addon (inline) |
+| Raw packet capture | tcpdump | tcpdump | netsh trace + etl2pcapng |
+| CA trust | update-ca-certificates | security add-trusted-cert | Import-Certificate |
+| S3 upload (post step) | aws cli | aws cli | aws cli |
 
 ## Integration with existing workflows
 

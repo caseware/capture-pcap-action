@@ -21,7 +21,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           fetch-depth: 0
       - name: Validate VERSION bump
@@ -52,12 +52,23 @@ jobs:
   # Integration test: capture HTTPS traffic -> verify PCAP -> upload to MinIO
   # ───────────────────────────────────────────────────────────────────
   test-linux:
-    name: "Integration test (Linux)"
-    runs-on: ubuntu-24.04-arm
+    name: "Integration test (${{ matrix.platform.label }}, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: Linux
+            runner: ubuntu-24.04-arm
+            mc_arch: arm64
+          - label: Linux (AMD64)
+            runner: ubuntu-24.04
+            mc_arch: amd64
+        proxy-tool: [fluxzy, mitmproxy]
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start MinIO
         run: |
@@ -77,8 +88,10 @@ jobs:
           done
 
       - name: Create MinIO bucket
+        env:
+          MC_ARCH: ${{ matrix.platform.mc_arch }}
         run: |
-          curl -sL https://dl.min.io/client/mc/release/linux-arm64/mc \
+          curl -sL "https://dl.min.io/client/mc/release/linux-${MC_ARCH}/mc" \
             -o /usr/local/bin/mc
           chmod +x /usr/local/bin/mc
           mc alias set local http://localhost:9000 minioadmin minioadmin
@@ -100,6 +113,7 @@ jobs:
         uses: ./start
         id: pcap-start
         with:
+          proxy-tool: ${{ matrix.proxy-tool }}
           filter-domains: '*.google.com,example.com'
           raw-capture: 'true'
 
@@ -122,6 +136,12 @@ jobs:
             -o /dev/null -w "example.com: HTTP %{http_code}\n" \
             https://example.com
 
+          # This request should be blocked by filter-domains.
+          curl -sS --max-time 15 \
+            --cacert "$CA_CERT" \
+            -o /dev/null -w "github.com: HTTP %{http_code}\n" \
+            https://github.com || true
+
           echo "=== Test requests complete ==="
 
       # ── Stop capture ───────────────────────────────────────────────
@@ -130,10 +150,70 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: test-pcap-bucket
-          s3-prefix: integration-test/${{ github.run_id }}
-          s3-endpoint: http://localhost:9000
+          s3-bucket: ''
           artifact-name: test-capture
+
+      - name: Assert domain filtering in proxy output
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
+          CAPTURE_DIR: ${{ env.PCAP_CAPTURE_DIR }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import sys
+          from urllib.parse import urlparse
+
+          capture_dir = os.environ["CAPTURE_DIR"]
+          proxy_tool = os.environ["PROXY_TOOL"]
+          allowed_suffixes = ("google.com", "example.com")
+          blocked_suffix = "github.com"
+
+          def host_is_allowed(host: str) -> bool:
+              return any(host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes)
+
+          def host_is_blocked(host: str) -> bool:
+              return host == blocked_suffix or host.endswith(f".{blocked_suffix}")
+
+          har_path = os.path.join(capture_dir, "capture.har")
+          if not os.path.exists(har_path):
+              print(f"::error::Missing HAR file: {har_path}")
+              sys.exit(1)
+
+          with open(har_path, "r", encoding="utf-8") as f:
+              har = json.load(f)
+
+          hosts = set()
+          allowed_success = set()
+          blocked_success = []
+
+          for entry in har.get("log", {}).get("entries", []):
+              url = entry.get("request", {}).get("url", "")
+              host = (urlparse(url).hostname or "").lower()
+              if not host:
+                  continue
+
+              hosts.add(host)
+              status = int(entry.get("response", {}).get("status", 0) or 0)
+              if status > 0 and host_is_allowed(host):
+                  allowed_success.add(host)
+              if status > 0 and host_is_blocked(host):
+                  blocked_success.append((host, status))
+
+          blocked_seen = sorted(h for h in hosts if host_is_blocked(h))
+
+          print(f"Captured hosts ({proxy_tool}): {sorted(hosts)}")
+          if blocked_seen:
+              print(f"Blocked hosts observed as attempts ({proxy_tool}): {blocked_seen}")
+
+          if not allowed_success:
+              print("::error::No successful allowed-domain traffic was captured in proxy output")
+              sys.exit(1)
+
+          if blocked_success:
+              print(f"::error::Blocked domain(s) unexpectedly received responses: {blocked_success}")
+              sys.exit(1)
+          PY
 
       # ── Verify PCAP ────────────────────────────────────────────────
       - name: Verify PCAP file exists and contains traffic
@@ -204,16 +284,27 @@ jobs:
   # Test without filters (all traffic)
   # ───────────────────────────────────────────────────────────────────
   test-linux-unfiltered:
-    name: "Integration test (Linux, no filter)"
-    runs-on: ubuntu-24.04-arm
+    name: "Integration test (${{ matrix.platform.label }}, no filter, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: Linux
+            runner: ubuntu-24.04-arm
+          - label: Linux (AMD64)
+            runner: ubuntu-24.04
+        proxy-tool: [fluxzy, mitmproxy]
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start PCAP capture (no filter)
         uses: ./start
         id: pcap-start
+        with:
+          proxy-tool: ${{ matrix.proxy-tool }}
 
       - name: Make test HTTPS requests
         run: |
@@ -229,12 +320,13 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: dummy-bucket
-          s3-endpoint: http://localhost:9999
+          s3-bucket: ''
           artifact-name: unfiltered-test
         continue-on-error: true
 
       - name: Verify capture artifacts
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
         run: |
           CAPTURE_DIR="$PCAP_CAPTURE_DIR"
           echo "Capture dir: $CAPTURE_DIR"
@@ -242,19 +334,25 @@ jobs:
 
           [ -f "$CAPTURE_DIR/raw-capture.pcap" ] && echo "PCAP: OK" || echo "::error::PCAP missing"
           [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::error::SSL keys missing"
-          [ -f "$CAPTURE_DIR/mitmproxy-flows" ] && echo "Flows: OK" || echo "::error::Flows missing"
+          [ -f "$CAPTURE_DIR/capture.har" ] && echo "HAR: OK" || echo "::error::HAR missing"
 
   test-windows:
-    name: "Integration test (Windows)"
-    runs-on: windows-latest
+    name: "Integration test (Windows, ${{ matrix.proxy-tool }})"
+    runs-on: windows-2022
+    strategy:
+      fail-fast: false
+      matrix:
+        proxy-tool: [fluxzy, mitmproxy]
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Start PCAP capture
         uses: ./start
         id: pcap-start
+        with:
+          proxy-tool: ${{ matrix.proxy-tool }}
 
       - name: Make test HTTPS requests (via proxy)
         shell: pwsh
@@ -286,22 +384,23 @@ jobs:
         uses: ./stop
         id: pcap-stop
         with:
-          s3-bucket: dummy-bucket
-          s3-endpoint: http://localhost:9999
+          s3-bucket: ''
         continue-on-error: true
 
       - name: Verify capture artifacts (Windows)
         if: always()
         shell: pwsh
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
         run: |
           $captureDir = $env:PCAP_CAPTURE_DIR
           Write-Host "Capture dir: $captureDir"
           Get-ChildItem $captureDir -Recurse -ErrorAction SilentlyContinue | Format-Table Name, Length
 
-          if (Test-Path (Join-Path $captureDir "mitmproxy-flows")) {
-            Write-Host "mitmproxy flows: OK"
+          if (Test-Path (Join-Path $captureDir "capture.har")) {
+            Write-Host "HAR: OK"
           } else {
-            Write-Host "::warning::mitmproxy flows not found"
+            Write-Host "::warning::HAR not found"
           }
 
           if (Test-Path (Join-Path $captureDir "sslkeys.log")) {
@@ -310,3 +409,60 @@ jobs:
           } else {
             Write-Host "::warning::SSL keylog not found"
           }
+
+  test-macos:
+    name: "Integration test (${{ matrix.platform.label }}, ${{ matrix.proxy-tool }})"
+    runs-on: ${{ matrix.platform.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - label: macOS (arm64)
+            runner: macos-26
+          - label: macOS (x64)
+            runner: macos-26-intel
+        proxy-tool: [fluxzy, mitmproxy]
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Start PCAP capture
+        uses: ./start
+        id: pcap-start
+        with:
+          proxy-tool: ${{ matrix.proxy-tool }}
+
+      - name: Make test HTTPS requests (via proxy)
+        shell: bash
+        run: |
+          set -euo pipefail
+          CA_CERT="${{ steps.pcap-start.outputs.ca-cert }}"
+
+          curl -sS --max-time 20 --cacert "$CA_CERT" \
+            -o /dev/null -w "google.com: HTTP %{http_code}\n" \
+            https://www.google.com || true
+          curl -sS --max-time 20 --cacert "$CA_CERT" \
+            -o /dev/null -w "example.com: HTTP %{http_code}\n" \
+            https://example.com || true
+
+      - name: Stop capture
+        uses: ./stop
+        id: pcap-stop
+        with:
+          s3-bucket: ''
+          artifact-name: macos-test
+        continue-on-error: true
+
+      - name: Verify capture artifacts (macOS)
+        shell: bash
+        env:
+          PROXY_TOOL: ${{ matrix.proxy-tool }}
+        run: |
+          set -euo pipefail
+          CAPTURE_DIR="$PCAP_CAPTURE_DIR"
+          echo "Capture dir: $CAPTURE_DIR"
+          ls -lah "$CAPTURE_DIR/" || true
+
+          [ -f "$CAPTURE_DIR/sslkeys.log" ] && echo "SSL keys: OK" || echo "::warning::SSL keys missing"
+          [ -f "$CAPTURE_DIR/capture.har" ] && echo "HAR: OK" || echo "::warning::HAR missing"

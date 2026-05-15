@@ -5,12 +5,12 @@ Guidelines for AI agents (GitHub Copilot, Devin, etc.) contributing to this repo
 ## Repository purpose
 
 This is a GitHub Action that captures e2e / regression test traffic as a
-TLS-decryptable PCAP bundle. It uses mitmproxy as a forward proxy for TLS
-interception and tcpdump (Linux) / netsh trace (Windows) for raw packet capture.
+TLS-decryptable PCAP bundle. It uses Fluxzy or mitmproxy as a forward proxy for
+TLS interception and tcpdump (Linux) / netsh trace (Windows) for raw packet capture.
 
 The action is split into two parts:
-- `start/` (composite) — installs mitmproxy, starts capture with inline filter addon
-- `stop/` (node20) — stops capture, bundles artifacts; S3 upload runs as a post step
+- `start/` (composite) — installs Fluxzy or mitmproxy, starts capture with inline filtering
+- `stop/` (node24) — stops capture, bundles artifacts; S3 upload runs as a post step
 
 ## Commit messages — Conventional Commits
 
@@ -49,7 +49,7 @@ Every PR must include a `VERSION` bump — the `version-bump` CI job enforces th
 | Path | Purpose |
 |------|---------|
 | `start/action.yml` | Composite action: install mitmproxy, start capture |
-| `stop/action.yml` | Node20 action: stop capture, bundle, S3 upload (post step) |
+| `stop/action.yml` | Node24 action: stop capture, bundle, S3 upload (post step) |
 | `stop/src/main.js` | Stop capture + bundle logic |
 | `stop/src/post.js` | S3 upload (runs at job cleanup time) |
 | `scripts/filter-addon.py` | mitmproxy inline filter addon |
