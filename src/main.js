@@ -369,7 +369,11 @@ async function main() {
   await saveState("s3-endpoint", getInput("s3-endpoint"));
   await saveState("capture-dir", captureDir);
 
-  console.log("Capture stopped and bundled. S3 upload will run in post step.");
+  if (getInput("s3-bucket")) {
+    console.log("Capture stopped and bundled. S3 upload will run in post step.");
+  } else {
+    console.log("Capture stopped and bundled. No S3 bucket configured; upload will be skipped.");
+  }
 }
 
 main().catch((e) => {

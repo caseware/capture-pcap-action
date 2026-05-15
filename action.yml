@@ -10,8 +10,9 @@ inputs:
     required: false
     default: ''
   s3-bucket:
-    description: 'S3 bucket name for the upload.'
-    required: true
+    description: 'S3 bucket name for the upload. Leave empty to skip S3 upload and keep artifacts local only.'
+    required: false
+    default: ''
   s3-prefix:
     description: 'S3 key prefix (folder path) for the upload.'
     required: false
