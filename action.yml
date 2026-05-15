@@ -51,6 +51,26 @@ inputs:
     description: 'Max response body size in bytes. Responses larger than this are dropped from the flow file (0 = no limit).'
     required: false
     default: '0'
+  strip-response-bodies:
+    description: 'Enable capture-time response body stripping for selected traffic. For fluxzy, this uses a mocked empty response rule on matching requests.'
+    required: false
+    default: 'false'
+  strip-body-domains:
+    description: 'Comma-separated domain patterns (glob) eligible for body stripping (e.g. "*.googletagmanager.com,*.google-analytics.com").'
+    required: false
+    default: ''
+  strip-body-exclude-domains:
+    description: 'Comma-separated domain patterns (glob) excluded from body stripping.'
+    required: false
+    default: ''
+  strip-body-paths:
+    description: 'Comma-separated URL path patterns (glob) eligible for body stripping (matched against request path+query).'
+    required: false
+    default: ''
+  strip-body-content-types:
+    description: 'Comma-separated response content-type prefixes used by mitmproxy stripping (e.g. "image/,font/,text/css,application/javascript"). Empty = no content-type check.'
+    required: false
+    default: ''
   raw-capture:
     description: 'Also run raw packet capture (tcpdump on Linux/macOS, netsh trace on Windows) alongside the proxy capture. Default: false (proxy-only).'
     required: false
@@ -90,6 +110,11 @@ runs:
         INPUT_FILTER_REFERERS: ${{ inputs.filter-referers }}
         INPUT_FILTER_CONTENT_TYPES: ${{ inputs.filter-content-types }}
         INPUT_FILTER_MAX_BODY_SIZE: ${{ inputs.filter-max-body-size }}
+        INPUT_STRIP_RESPONSE_BODIES: ${{ inputs.strip-response-bodies }}
+        INPUT_STRIP_BODY_DOMAINS: ${{ inputs.strip-body-domains }}
+        INPUT_STRIP_BODY_EXCLUDE_DOMAINS: ${{ inputs.strip-body-exclude-domains }}
+        INPUT_STRIP_BODY_PATHS: ${{ inputs.strip-body-paths }}
+        INPUT_STRIP_BODY_CONTENT_TYPES: ${{ inputs.strip-body-content-types }}
       run: |
         if [ -n "$INPUT_CAPTURE_DIR" ]; then
           CAPTURE_DIR="$INPUT_CAPTURE_DIR"
@@ -132,6 +157,11 @@ runs:
         echo "PCAP_FILTER_REFERERS=$INPUT_FILTER_REFERERS" >> "$GITHUB_ENV"
         echo "PCAP_FILTER_CONTENT_TYPES=$INPUT_FILTER_CONTENT_TYPES" >> "$GITHUB_ENV"
         echo "PCAP_FILTER_MAX_BODY_SIZE=$INPUT_FILTER_MAX_BODY_SIZE" >> "$GITHUB_ENV"
+        echo "PCAP_STRIP_RESPONSE_BODIES=$INPUT_STRIP_RESPONSE_BODIES" >> "$GITHUB_ENV"
+        echo "PCAP_STRIP_BODY_DOMAINS=$INPUT_STRIP_BODY_DOMAINS" >> "$GITHUB_ENV"
+        echo "PCAP_STRIP_BODY_EXCLUDE_DOMAINS=$INPUT_STRIP_BODY_EXCLUDE_DOMAINS" >> "$GITHUB_ENV"
+        echo "PCAP_STRIP_BODY_PATHS=$INPUT_STRIP_BODY_PATHS" >> "$GITHUB_ENV"
+        echo "PCAP_STRIP_BODY_CONTENT_TYPES=$INPUT_STRIP_BODY_CONTENT_TYPES" >> "$GITHUB_ENV"
 
     # ── Install proxy tool ──────────────────────────────────────────────
     - name: Cache Fluxzy npm cache
@@ -291,6 +321,10 @@ runs:
         CAPTURE_DIR: ${{ steps.setup-dirs.outputs.capture-dir }}
         INPUT_FILTER_DOMAINS: ${{ inputs.filter-domains }}
         INPUT_FILTER_EXCLUDE_DOMAINS: ${{ inputs.filter-exclude-domains }}
+        INPUT_STRIP_RESPONSE_BODIES: ${{ inputs.strip-response-bodies }}
+        INPUT_STRIP_BODY_DOMAINS: ${{ inputs.strip-body-domains }}
+        INPUT_STRIP_BODY_EXCLUDE_DOMAINS: ${{ inputs.strip-body-exclude-domains }}
+        INPUT_STRIP_BODY_PATHS: ${{ inputs.strip-body-paths }}
       run: |
         set -euo pipefail
         RULE_FILE="$CAPTURE_DIR/fluxzy-rules.yml"
@@ -306,11 +340,26 @@ runs:
           exit 1
         fi
 
-        "${PYTHON_CMD[@]}" - "$RULE_FILE" "$INPUT_FILTER_DOMAINS" "$INPUT_FILTER_EXCLUDE_DOMAINS" <<'PY'
+        "${PYTHON_CMD[@]}" - \
+          "$RULE_FILE" \
+          "$INPUT_FILTER_DOMAINS" \
+          "$INPUT_FILTER_EXCLUDE_DOMAINS" \
+          "$INPUT_STRIP_RESPONSE_BODIES" \
+          "$INPUT_STRIP_BODY_DOMAINS" \
+          "$INPUT_STRIP_BODY_EXCLUDE_DOMAINS" \
+          "$INPUT_STRIP_BODY_PATHS" <<'PY'
         import re
         import sys
 
-        rule_file, allow_csv, deny_csv = sys.argv[1:4]
+        (
+          rule_file,
+          allow_csv,
+          deny_csv,
+          strip_enabled,
+          strip_domains_csv,
+          strip_exclude_domains_csv,
+          strip_paths_csv,
+        ) = sys.argv[1:8]
 
         def parse_csv(value: str):
           return [x.strip() for x in value.split(",") if x.strip()]
@@ -322,8 +371,12 @@ runs:
 
         allow = parse_csv(allow_csv)
         deny = parse_csv(deny_csv)
+        strip_domains = parse_csv(strip_domains_csv)
+        strip_exclude_domains = parse_csv(strip_exclude_domains_csv)
+        strip_paths = parse_csv(strip_paths_csv)
+        strip_enabled = str(strip_enabled).lower() == "true"
 
-        if not allow and not deny:
+        if not allow and not deny and not (strip_enabled and (strip_domains or strip_paths)):
           sys.exit(0)
 
         lines = ["rules:"]
@@ -352,6 +405,52 @@ runs:
             lines.append("          operation: regex")
           lines.append("    actions:")
           lines.append("      - typeKind: AbortAction")
+
+        if strip_enabled and (strip_domains or strip_paths):
+          lines.append("  - filter:")
+          lines.append("      typeKind: FilterCollection")
+          lines.append("      operation: And")
+          lines.append("      children:")
+
+          if strip_exclude_domains:
+            lines.append("        - typeKind: FilterCollection")
+            lines.append("          operation: Or")
+            lines.append("          inverted: true")
+            lines.append("          children:")
+            for d in strip_exclude_domains:
+              lines.append("            - typeKind: HostFilter")
+              lines.append(f"              pattern: {glob_to_regex(d)}")
+              lines.append("              operation: regex")
+
+          if strip_domains:
+            lines.append("        - typeKind: FilterCollection")
+            lines.append("          operation: Or")
+            lines.append("          children:")
+            for d in strip_domains:
+              lines.append("            - typeKind: HostFilter")
+              lines.append(f"              pattern: {glob_to_regex(d)}")
+              lines.append("              operation: regex")
+
+          if strip_paths:
+            lines.append("        - typeKind: FilterCollection")
+            lines.append("          operation: Or")
+            lines.append("          children:")
+            for p in strip_paths:
+              lines.append("            - typeKind: PathFilter")
+              lines.append(f"              pattern: {glob_to_regex(p)}")
+              lines.append("              operation: regex")
+
+          lines.append("    actions:")
+          lines.append("      - typeKind: MockedResponseAction")
+          lines.append("        response:")
+          lines.append("          statusCode: 204")
+          lines.append("          headers:")
+          lines.append("            - name: X-Capture-Body-Stripped")
+          lines.append("              value: 'true'")
+          lines.append("          body:")
+          lines.append("            origin: FromString")
+          lines.append("            type: Text")
+          lines.append("            text: ''")
 
         with open(rule_file, "w", encoding="utf-8") as f:
           f.write("\n".join(lines) + "\n")
