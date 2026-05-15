@@ -12,6 +12,34 @@ When `proxy-tool: mitmproxy`, filtering happens **inline** in the mitmproxy addo
 
 The resulting bundle can be opened in [Wireshark](https://www.wireshark.org/) with full TLS decryption using the included `sslkeys.log` file.
 
+
+### Dual-Proxy Support
+
+This action currently supports two proxy engines:
+
+1. **Fluxzy** (Default): High-performance .NET-based proxy. Best for x86_64 runners.
+2. **mitmproxy**: Python-based proxy with excellent ARM64 support. Automatically selected if running on an ARM64 node, or can be forced via `proxy-type`.
+
+### Filtering
+
+You can filter captured traffic using the `filter-rules` input.
+
+- **Fluxzy**: Uses a comma-separated list of host filters (e.g., `example.com,test.org`).
+- **mitmproxy**: Uses standard mitmproxy filter expressions (e.g., `~u example.com & ~m POST`).
+
+### custom-rules-file
+
+Use `custom-rules-file` to provide tool-native custom behavior in addition to existing inputs (`filter-*`, `strip-*`, `ignore-hosts`).
+
+- **Fluxzy**: Interpreted as a Fluxzy rules YAML file and loaded with `-r`.
+  If generated rules from this action also exist, both rule sets are combined and applied.
+  Docs: [Fluxzy repository/documentation](https://github.com/haga-rak/fluxzy.core)
+- **mitmproxy**: Interpreted as a mitmproxy Python addon script and loaded with `--scripts`.
+  It runs in addition to the action's built-in addon.
+  Docs: [mitmproxy addons overview](https://docs.mitmproxy.org/stable/addons-overview/)
+
+Path resolution supports both absolute paths and workspace-relative paths.
+
 ## Usage
 
 ### Basic — wrap your e2e tests
@@ -87,6 +115,7 @@ Only capture traffic to your own services:
 | `filter-referers` | _(empty)_ | Referer patterns to keep (comma-sep, globs OK) |
 | `filter-content-types` | _(empty)_ | Content-type prefixes to keep (e.g. `text/html,application/json`) |
 | `filter-max-body-size` | `0` | Max response body size in bytes (0 = no limit) |
+| `custom-rules-file` | _(empty)_ | Single custom rules input. Fluxzy: rules YAML (`-r`). mitmproxy: addon script (`--scripts`). |
 | `raw-capture` | `false` | Also run tcpdump/netsh for raw packet capture alongside mitmproxy |
 | `no-proxy` | `cloud.nx.app,nx.app,registry.npmjs.org,objects.githubusercontent.com,localhost,127.0.0.1,::1` | Comma-separated hosts that bypass the proxy (NO_PROXY) |
 
@@ -95,13 +124,14 @@ Only capture traffic to your own services:
 | Input | Default | Description |
 |-------|---------|-------------|
 | `capture-dir` | _(from env)_ | Capture directory (auto-detected from start action) |
-| `s3-bucket` | **required** | S3 bucket name |
+| `s3-bucket` | _(empty)_ | S3 bucket name. Leave empty to skip upload and keep bundle local only |
 | `s3-prefix` | `pcap-captures` | S3 key prefix |
 | `s3-endpoint` | _(empty)_ | Custom S3 endpoint URL |
 | `artifact-name` | _(timestamped)_ | Name for the capture bundle |
 
-> **Note:** The stop action's S3 upload runs as a **post step** — it will execute
-> at job cleanup time even if later steps fail.
+> **Note:** The stop action's S3 upload runs as a **post step** when `s3-bucket`
+> is set — it will execute at job cleanup time even if later steps fail. If
+> `s3-bucket` is empty, upload is skipped and artifacts remain local.
 
 ## Outputs
 
